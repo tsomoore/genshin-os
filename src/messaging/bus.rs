@@ -5,9 +5,10 @@
 // - LockFreeBus: (Future) Atomic-based lock-free implementation
 
 use crate::messaging::msg::KernelMsg;
-use crate::messaging::response::{RequestWithResponse, Response};
+use crate::messaging::response::{RequestWithResponse, Response, RequestId, generate_request_id};
 use crossbeam_channel::{unbounded, Receiver, Sender, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 use thiserror::Error;
 
 /// Errors that can occur during message bus operations
@@ -21,6 +22,71 @@ pub enum BusError {
 
     #[error("No receiver registered for message type: {0}")]
     NoReceiver(String),
+}
+
+/// Message envelope that wraps KernelMsg with optional response channel
+///
+/// This allows the message bus to carry both fire-and-forget messages
+/// and request-response messages.
+pub struct Envelope {
+    /// The actual message
+    pub message: KernelMsg,
+
+    /// Request ID (if this is a request)
+    pub request_id: Option<RequestId>,
+
+    /// Response channel (if this is a request)
+    pub response_channel: Option<Sender<Response>>,
+}
+
+impl Envelope {
+    /// Create a fire-and-forget envelope
+    pub fn fire_and_forget(message: KernelMsg) -> Self {
+        Self {
+            message,
+            request_id: None,
+            response_channel: None,
+        }
+    }
+
+    /// Create a request envelope with response channel
+    pub fn with_response(message: KernelMsg) -> (Self, Receiver<Response>) {
+        let request_id = generate_request_id();
+        let (tx, rx) = unbounded();
+
+        let envelope = Self {
+            message,
+            request_id: Some(request_id),
+            response_channel: Some(tx),
+        };
+
+        (envelope, rx)
+    }
+
+    /// Check if this envelope expects a response
+    pub fn expects_response(&self) -> bool {
+        self.response_channel.is_some()
+    }
+
+    /// Send a success response
+    pub fn respond_success(&self, data: crate::messaging::response::ResponseData) -> Result<(), crossbeam_channel::SendError<Response>> {
+        if let (Some(request_id), Some(channel)) = (self.request_id, &self.response_channel) {
+            let resp = Response::success(request_id, data);
+            channel.send(resp)
+        } else {
+            Ok(()) // No response expected, silently succeed
+        }
+    }
+
+    /// Send an error response
+    pub fn respond_error(&self, error: crate::messaging::response::ServiceError) -> Result<(), crossbeam_channel::SendError<Response>> {
+        if let (Some(request_id), Some(channel)) = (self.request_id, &self.response_channel) {
+            let resp = Response::error(request_id, error);
+            channel.send(resp)
+        } else {
+            Ok(()) // No response expected, silently succeed
+        }
+    }
 }
 
 /// Core message bus trait
@@ -49,10 +115,10 @@ pub trait MessageBus: Send + Sync {
     /// Returns `BusError` if the request cannot be sent.
     fn send_request(&self, msg: KernelMsg) -> Result<Receiver<Response>, BusError>;
 
-    /// Subscribe to receive messages from the bus
+    /// Subscribe to receive envelopes from the bus
     ///
-    /// Returns a receiver for the subscribed message channel.
-    fn subscribe(&self) -> Receiver<KernelMsg>;
+    /// Returns a receiver for the subscribed envelope channel.
+    fn subscribe(&self) -> Receiver<Envelope>;
 
     /// Clone the bus handle
     ///
@@ -62,7 +128,7 @@ pub trait MessageBus: Send + Sync {
 
 /// Internal state for LockedBus
 struct LockedBusState {
-    subscribers: Vec<Sender<KernelMsg>>,
+    subscribers: Vec<Sender<Envelope>>,
 }
 
 /// LockedBus: Mutex-based message bus using crossbeam channels
@@ -121,37 +187,48 @@ impl MessageBus for LockedBus {
             return Ok(());
         }
 
-        let mut last_error = None;
+        let envelope = Envelope::fire_and_forget(msg);
 
         // Try to send to all subscribers
+        // Each gets its own copy of the message
         for subscriber in &state.subscribers {
-            let _ = subscriber
-                .try_send(msg.clone())
-                .map_err(|e| match e {
-                    TrySendError::Disconnected(_) => BusError::Disconnected,
-                    TrySendError::Full(_) => BusError::Full,
-                })
-                .map_err(|e| last_error = Some(e));
+            let _ = subscriber.try_send(Envelope::fire_and_forget(envelope.message.clone()));
         }
 
-        // If at least one send succeeded, consider it a success
-        // This is fire-and-forget - we don't care if some receivers are dead
+        // Fire-and-forget - don't care about errors
         Ok(())
     }
 
     fn send_request(&self, msg: KernelMsg) -> Result<Receiver<Response>, BusError> {
-        // Create request-response pair
-        let (req, rx) = RequestWithResponse::new(msg);
+        let state = self.state.lock().unwrap();
 
-        // Send the message
-        self.send(req.message.clone())?;
+        // Create envelope with response channel
+        let (envelope, rx) = Envelope::with_response(msg);
 
-        // Return the response receiver
-        Ok(rx)
+        // Extract the parts we need
+        let message = envelope.message;
+        let request_id = envelope.request_id;
+        let response_channel = envelope.response_channel;
+
+        // Send to the first available subscriber
+        // For request-response, only one handler should process it
+        for subscriber in &state.subscribers {
+            let env = Envelope {
+                message: message.clone(),
+                request_id,
+                response_channel: response_channel.clone(),
+            };
+
+            if subscriber.try_send(env).is_ok() {
+                return Ok(rx);
+            }
+        }
+
+        Err(BusError::Disconnected)
     }
 
-    fn subscribe(&self) -> Receiver<KernelMsg> {
-        let (tx, rx) = unbounded::<KernelMsg>();
+    fn subscribe(&self) -> Receiver<Envelope> {
+        let (tx, rx) = unbounded::<Envelope>();
 
         let mut state = self.state.lock().unwrap();
         state.subscribers.push(tx);
@@ -174,8 +251,8 @@ impl MessageBus for LockedBus {
 /// # // Note: DirectBus is for internal use, prefer LockedBus for external API
 /// ```
 pub struct DirectBus {
-    tx: Sender<KernelMsg>,
-    rx: Receiver<KernelMsg>,
+    tx: Sender<Envelope>,
+    rx: Receiver<Envelope>,
 }
 
 impl DirectBus {
@@ -207,33 +284,44 @@ impl Default for DirectBus {
 /// Sender handle for DirectBus
 #[derive(Clone)]
 pub struct DirectBusSender {
-    tx: Sender<KernelMsg>,
+    tx: Sender<Envelope>,
 }
 
 impl DirectBusSender {
     /// Send a message through the bus
     pub fn send(&self, msg: KernelMsg) -> Result<(), BusError> {
-        self.tx.try_send(msg).map_err(|e| match e {
+        let envelope = Envelope::fire_and_forget(msg);
+        self.tx.try_send(envelope).map_err(|e| match e {
             TrySendError::Disconnected(_) => BusError::Disconnected,
             TrySendError::Full(_) => BusError::Full,
         })
+    }
+
+    /// Send a request and wait for response
+    pub fn send_request(&self, msg: KernelMsg) -> Result<Receiver<Response>, BusError> {
+        let (envelope, rx) = Envelope::with_response(msg);
+        self.tx.try_send(envelope).map_err(|e| match e {
+            TrySendError::Disconnected(_) => BusError::Disconnected,
+            TrySendError::Full(_) => BusError::Full,
+        })?;
+        Ok(rx)
     }
 }
 
 /// Receiver handle for DirectBus
 #[derive(Clone)]
 pub struct DirectBusReceiver {
-    rx: Receiver<KernelMsg>,
+    rx: Receiver<Envelope>,
 }
 
 impl DirectBusReceiver {
     /// Receive a message, blocking until available
-    pub fn recv(&self) -> Result<KernelMsg, BusError> {
+    pub fn recv(&self) -> Result<Envelope, BusError> {
         self.rx.recv().map_err(|_| BusError::Disconnected)
     }
 
     /// Try to receive a message without blocking
-    pub fn try_recv(&self) -> Result<KernelMsg, BusError> {
+    pub fn try_recv(&self) -> Result<Envelope, BusError> {
         self.rx.try_recv().map_err(|e| match e {
             crossbeam_channel::TryRecvError::Empty => {
                 BusError::Full // Empty channel - treat as would block
@@ -267,9 +355,10 @@ mod tests {
         let msg = KernelMsg::Interrupt(Interrupt::Timer);
         bus.send(msg.clone()).unwrap();
 
-        // Receive the message
-        let received = receiver.recv().unwrap();
-        assert_eq!(msg, received);
+        // Receive the envelope
+        let envelope = receiver.recv().unwrap();
+        assert!(!envelope.expects_response());
+        assert_eq!(msg, envelope.message);
     }
 
     #[test]
@@ -283,10 +372,10 @@ mod tests {
         bus.send(msg.clone()).unwrap();
 
         // Both receivers should get the message
-        let received1 = receiver1.recv().unwrap();
-        let received2 = receiver2.recv().unwrap();
-        assert_eq!(msg, received1);
-        assert_eq!(msg, received2);
+        let env1 = receiver1.recv().unwrap();
+        let env2 = receiver2.recv().unwrap();
+        assert_eq!(msg, env1.message);
+        assert_eq!(msg, env2.message);
     }
 
     #[test]
@@ -302,9 +391,10 @@ mod tests {
         });
         sender.send(msg.clone()).unwrap();
 
-        // Receive the message
-        let received = receiver.recv().unwrap();
-        assert_eq!(msg, received);
+        // Receive the envelope
+        let envelope = receiver.recv().unwrap();
+        assert_eq!(msg, envelope.message);
+        assert!(!envelope.expects_response());
     }
 
     #[test]

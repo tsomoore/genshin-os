@@ -8,6 +8,8 @@
 
 pub mod messaging;
 pub mod hardware;
+pub mod services;
+pub mod ui;
 pub mod error;
 
 // Re-export core types for convenience
@@ -40,3 +42,4 @@ pub use error::{
     AccessType as ErrorAccessType, PageFlags as ErrorPageFlags,
     Result as GenshinResult,
 };
+pub use ui::{UIContext, Shell, ShellConfig};

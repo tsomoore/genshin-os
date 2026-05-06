@@ -1,0 +1,1260 @@
+// ProcessService - Main Process Management Service
+//
+// 曾国藩曰：
+// "为将之道，当知进退，明赏罚。"
+// 进程服务管理进程之生死、调度与通信，当公平高效。
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use crossbeam_channel::{Receiver, Sender};
+use crate::messaging::{
+    KernelMsg, ProcessRequest, Syscall, Interrupt, Pid, Tid,
+    VirtAddr, PhysAddr, IPCMessage, SignalType, BlockReason, MemProt,
+    MessageBus, RequestWithResponse, Response, ResponseData,
+};
+use crate::messaging::bus::Envelope;
+use crate::hardware::CPUState;
+use crate::error::{GenshinError, ServiceError};
+use crate::GenshinResult;
+
+// Import process service components
+use super::pcb::{PCB, TCB, ProcessState, ThreadState};
+use super::ipc::{IPCManager, MessageQueue, SharedMemoryRegion};
+use super::sync::{SyncManager, Semaphore, MutexLock};
+use super::scheduler::{Scheduler, SchedulingPolicy, SchedulingDecision};
+
+/// Process Service - Main process management service
+///
+/// 曾国藩曰：
+/// "治军如治家，赏罚分明，进退有度。"
+/// 进程服务统筹进程管理、调度、IPC与同步，确保系统高效运行。
+#[derive(Debug)]
+pub struct ProcessService {
+    /// Message bus for sending/receiving messages
+    bus: Arc<dyn MessageBus>,
+
+    /// Receiver for message bus (envelopes)
+    receiver: Receiver<Envelope>,
+
+    /// Process table (pid -> PCB)
+    process_table: Arc<Mutex<HashMap<Pid, Arc<Mutex<PCB>>>>>,
+
+    /// Next process ID to assign
+    next_pid: Arc<Mutex<Pid>>,
+
+    /// IPC manager
+    ipc_manager: Arc<Mutex<IPCManager>>,
+
+    /// Sync manager
+    sync_manager: Arc<Mutex<SyncManager>>,
+
+    /// Process/thread scheduler
+    scheduler: Arc<Mutex<Scheduler>>,
+
+    /// Parent-child relationships (pid -> children pids)
+    parent_children: Arc<Mutex<HashMap<Pid, Vec<Pid>>>>,
+}
+
+impl ProcessService {
+    /// Create a new process service
+    pub fn new(bus: Arc<dyn MessageBus>) -> Self {
+        let receiver = bus.subscribe();
+
+        Self {
+            bus,
+            receiver,
+            process_table: Arc::new(Mutex::new(HashMap::new())),
+            next_pid: Arc::new(Mutex::new(1)), // Start from PID 1
+            ipc_manager: Arc::new(Mutex::new(IPCManager::new())),
+            sync_manager: Arc::new(Mutex::new(SyncManager::new())),
+            scheduler: Arc::new(Mutex::new(Scheduler::round_robin(10))),
+            parent_children: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Run the process service (main loop)
+    pub fn run(&self) {
+        println!("ProcessService starting...");
+
+        loop {
+            match self.receiver.recv() {
+                Ok(envelope) => {
+                    // Handle the envelope
+                    if let Err(e) = self.handle_envelope(envelope) {
+                        eprintln!("ProcessService error: {}", e);
+                    }
+                }
+                Err(_) => {
+                    eprintln!("Message bus disconnected");
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Handle incoming envelope
+    fn handle_envelope(&self, envelope: Envelope) -> GenshinResult<()> {
+        let msg = envelope.message;
+
+        // Handle the message
+        let result = match msg {
+            KernelMsg::Process(req) => {
+                if envelope.expects_response() {
+                    self.handle_process_request_with_response(req, &envelope)
+                } else {
+                    self.handle_process_request(req)
+                }
+            }
+            KernelMsg::Syscall(req) => {
+                if envelope.expects_response() {
+                    self.handle_syscall_with_response(req, &envelope)
+                } else {
+                    self.handle_syscall(req)
+                }
+            }
+            KernelMsg::Interrupt(int) => self.handle_interrupt(int),
+            _ => {
+                // Ignore other messages
+                Ok(())
+            }
+        };
+
+        // Log errors but don't fail the service
+        if let Err(e) = result {
+            eprintln!("ProcessService error handling message: {}", e);
+
+            // If this was a request, send error response
+            if envelope.expects_response() {
+                let _ = envelope.respond_error(ServiceError::Other {
+                    code: 1,
+                    msg: e.to_string(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle process service request
+    fn handle_process_request(&self, req: ProcessRequest) -> GenshinResult<()> {
+        match req {
+            // ========== Scheduling ==========
+            ProcessRequest::Schedule { pid, tid } => {
+                self.handle_schedule(pid, tid)?;
+            }
+
+            ProcessRequest::Block { pid, tid, reason } => {
+                self.handle_block(pid, tid, reason)?;
+            }
+
+            ProcessRequest::Unblock { pid, tid } => {
+                self.handle_unblock(pid, tid)?;
+            }
+
+            ProcessRequest::QueryState { pid } => {
+                self.handle_query_state(pid)?;
+            }
+
+            ProcessRequest::ContextSwitch { from_pid, to_pid } => {
+                self.handle_context_switch(from_pid, to_pid)?;
+            }
+
+            // ========== IPC: Message Passing ==========
+            ProcessRequest::SendMessage { from_pid, to_pid, msg } => {
+                self.handle_send_message(from_pid, to_pid, msg)?;
+            }
+
+            ProcessRequest::ReceiveMessage { pid, blocking } => {
+                self.handle_receive_message(pid, blocking)?;
+            }
+
+            ProcessRequest::PeekMessage { pid } => {
+                self.handle_peek_message(pid)?;
+            }
+
+            // ========== IPC: Shared Memory ==========
+            ProcessRequest::CreateSharedMemory { pid, size, prot } => {
+                self.handle_create_shared_memory(pid, size, prot)?;
+            }
+
+            ProcessRequest::AttachSharedMemory { pid, shmid } => {
+                self.handle_attach_shared_memory(pid, shmid)?;
+            }
+
+            ProcessRequest::DetachSharedMemory { pid, shmid } => {
+                self.handle_detach_shared_memory(pid, shmid)?;
+            }
+
+            // ========== IPC: Synchronization ==========
+            ProcessRequest::CreateSemaphore { pid, initial_value } => {
+                self.handle_create_semaphore(pid, initial_value)?;
+            }
+
+            ProcessRequest::WaitSemaphore { pid, semid } => {
+                self.handle_wait_semaphore(pid, semid)?;
+            }
+
+            ProcessRequest::SignalSemaphore { pid, semid } => {
+                self.handle_signal_semaphore(pid, semid)?;
+            }
+
+            ProcessRequest::CreateLock { pid } => {
+                self.handle_create_lock(pid)?;
+            }
+
+            ProcessRequest::AcquireLock { pid, lock_id } => {
+                self.handle_acquire_lock(pid, lock_id)?;
+            }
+
+            ProcessRequest::ReleaseLock { pid, lock_id } => {
+                self.handle_release_lock(pid, lock_id)?;
+            }
+
+            // ========== Process Lifecycle ==========
+            ProcessRequest::ForkProcess { parent_pid } => {
+                self.handle_fork(parent_pid)?;
+            }
+
+            ProcessRequest::ExecProcess { pid, executable, args } => {
+                self.handle_exec(pid, executable, args)?;
+            }
+
+            ProcessRequest::WaitChild { pid, child_pid } => {
+                self.handle_wait_child(pid, child_pid)?;
+            }
+
+            ProcessRequest::Signal { pid, signal } => {
+                self.handle_signal(pid, signal)?;
+            }
+
+            ProcessRequest::GetProcessInfo { pid } => {
+                self.handle_get_process_info(pid)?;
+            }
+
+            ProcessRequest::ListProcesses => {
+                self.handle_list_processes()?;
+            }
+        }
+
+    /// Handle process service request with response
+    fn handle_process_request_with_response(&self, req: ProcessRequest, envelope: &Envelope) -> GenshinResult<()> {
+        match req {
+            // ========== Process Lifecycle ==========
+            ProcessRequest::ForkProcess { parent_pid } => {
+                self.handle_fork_with_response(parent_pid, envelope)?;
+            }
+
+            ProcessRequest::ExecProcess { pid, executable, args } => {
+                self.handle_exec_with_response(pid, executable, args, envelope)?;
+            }
+
+            ProcessRequest::WaitChild { pid, child_pid } => {
+                self.handle_wait_child_with_response(pid, child_pid, envelope)?;
+            }
+
+            ProcessRequest::GetProcessInfo { pid } => {
+                self.handle_get_process_info_with_response(pid, envelope)?;
+            }
+
+            _ => {
+                // For other requests, try the regular handler and return void response
+                self.handle_process_request(req)?;
+                envelope.respond_success(ResponseData::Void)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle syscall with response
+    fn handle_syscall_with_response(&self, syscall: Syscall, envelope: &Envelope) -> GenshinResult<()> {
+        match syscall {
+            Syscall::CreateProcess { executable, args } => {
+                let pid = self.create_process(&executable, args)?;
+                envelope.respond_success(ResponseData::Pid(pid))?;
+                println!("ProcessService: Created process {} ({})", pid, executable);
+            }
+
+            Syscall::ExitProcess { exit_code } => {
+                // Need to get current PID from context
+                // For now, we'll implement a simpler version
+                println!("ProcessService: Exit with code {}", exit_code);
+                envelope.respond_success(ResponseData::Void)?;
+            }
+
+            _ => {
+                // Handle other syscalls and return void response
+                self.handle_syscall(syscall)?;
+                envelope.respond_success(ResponseData::Void)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle system call
+    fn handle_syscall(&self, syscall: Syscall) -> GenshinResult<()> {
+        match syscall {
+            Syscall::CreateProcess { executable, args } => {
+                let pid = self.create_process(&executable, args)?;
+                println!("ProcessService: Created process {} ({})", pid, executable);
+            }
+
+            Syscall::ExitProcess { exit_code } => {
+                // Need to get current PID from context
+                // For now, we'll implement a simpler version
+                println!("ProcessService: Exit with code {}", exit_code);
+            }
+
+            Syscall::CreateThread { entry_point } => {
+                // Create thread in current process
+                // For now, just log
+                println!("ProcessService: Create thread at {:#x}", entry_point);
+            }
+
+            _ => {
+                println!("ProcessService: Received syscall {:?}", syscall);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle hardware interrupt
+    fn handle_interrupt(&self, interrupt: Interrupt) -> GenshinResult<()> {
+        match interrupt {
+            Interrupt::Timer => {
+                // Timer interrupt - trigger scheduling
+                self.handle_timer_interrupt()?;
+            }
+
+            Interrupt::PageFault { addr, access_type } => {
+                // Page fault - forward to memory service
+                let msg = crate::messaging::MemoryRequest::PageFaultHandler {
+                    pid: 0, // Need to get current PID
+                    faulting_addr: addr,
+                    access_type,
+                };
+                let _ = self.bus.send(KernelMsg::Memory(msg));
+            }
+
+            Interrupt::HardwareFailure { component } => {
+                eprintln!("ProcessService: Hardware failure in {}", component);
+            }
+
+            _ => {
+                println!("ProcessService: Received interrupt {:?}", interrupt);
+            }
+        }
+
+        Ok(())
+    }
+
+    // ========== Scheduling Handlers ==========
+
+    fn handle_schedule(&self, pid: Pid, tid: Tid) -> GenshinResult<()> {
+        let mut scheduler = Self::lock_mutex(&self.scheduler)?;
+
+        // Get process priority
+        let table = Self::lock_mutex(&self.process_table)?;
+        let priority = if let Some(pcb) = table.get(&pid) {
+            let pcb = Self::lock_mutex(pcb)?;
+            pcb.priority
+        } else {
+            128 // Default priority
+        };
+
+        let mut scheduler = Self::lock_mutex(&self.scheduler)?;
+        scheduler.ready(pid, tid, priority);
+        Ok(())
+    }
+
+    fn handle_block(&self, pid: Pid, tid: Tid, reason: BlockReason) -> GenshinResult<()> {
+        let mut scheduler = Self::lock_mutex(&self.scheduler)?;
+        scheduler.block(pid, tid);
+
+        // Update PCB state
+        let table = Self::lock_mutex(&self.process_table)?;
+        if let Some(pcb) = table.get(&pid) {
+            let mut pcb = Self::lock_mutex(pcb)?;
+            pcb.state = ProcessState::Blocked(BlockReason::WaitingForIo { device_id: 0 });
+        }
+
+        println!("ProcessService: Blocked {}:{} ({:?})", pid, tid, reason);
+        Ok(())
+    }
+
+    fn handle_unblock(&self, pid: Pid, tid: Tid) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        if let Some(pcb) = table.get(&pid) {
+            let mut pcb = Self::lock_mutex(pcb)?;
+            pcb.state = ProcessState::Ready;
+        }
+
+        // Add to ready queue
+        drop(table); // Release lock before calling handle_schedule
+        self.handle_schedule(pid, tid)?;
+
+        println!("ProcessService: Unblocked {}:{}", pid, tid);
+        Ok(())
+    }
+
+    fn handle_query_state(&self, pid: Pid) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        if let Some(pcb) = table.get(&pid) {
+            let pcb = Self::lock_mutex(pcb)?;
+            println!("ProcessService: {} state: {:?}", pid, pcb.state);
+        } else {
+            return Err(GenshinError::Service(ServiceError::NotFound {
+                resource_type: "Process".to_string(),
+                id: pid.to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn handle_context_switch(&self, from_pid: Pid, to_pid: Pid) -> GenshinResult<()> {
+        println!("ProcessService: Context switch {} -> {}", from_pid, to_pid);
+
+        // Update scheduler
+        let mut scheduler = Self::lock_mutex(&self.scheduler)?;
+
+        // Block current process
+        scheduler.block(from_pid, 1);
+
+        // Schedule next process
+        scheduler.ready(to_pid, 1, 128);
+
+        Ok(())
+    }
+
+    fn handle_timer_interrupt(&self) -> GenshinResult<()> {
+        let mut scheduler = Self::lock_mutex(&self.scheduler)?;
+        let decision = scheduler.schedule();
+
+        match decision {
+            SchedulingDecision::Run { pid, tid } => {
+                println!("ProcessService: Timer tick - scheduling {}:{}", pid, tid);
+            }
+            SchedulingDecision::Idle => {
+                // No process to run
+            }
+            SchedulingDecision::Halt => {
+                println!("ProcessService: All processes terminated");
+            }
+        }
+
+        Ok(())
+    }
+
+    // ========== IPC: Message Passing Handlers ==========
+
+    fn handle_send_message(&self, from_pid: Pid, to_pid: Pid, msg: IPCMessage) -> GenshinResult<()> {
+        // Verify both processes exist
+        let table = Self::lock_mutex(&self.process_table)?;
+        if !table.contains_key(&from_pid) {
+            return Err(GenshinError::Service(ServiceError::NotFound {
+                resource_type: "Process".to_string(),
+                id: from_pid.to_string(),
+            }));
+        }
+        if !table.contains_key(&to_pid) {
+            return Err(GenshinError::Service(ServiceError::NotFound {
+                resource_type: "Process".to_string(),
+                id: to_pid.to_string(),
+            }));
+        }
+
+        // Get target process's main thread
+        let tid = 1; // Main thread
+
+        // Send via IPC manager
+        drop(table);
+        let mut ipc = Self::lock_mutex(&self.ipc_manager)?;
+        let queue_arc = ipc.ensure_message_queue(to_pid);
+        let mut queue = Self::lock_mutex(queue_arc)?;
+
+        queue.send(from_pid, tid, msg)?;
+
+        println!("ProcessService: Message sent from {} to {}", from_pid, to_pid);
+        Ok(())
+    }
+
+    fn handle_receive_message(&self, pid: Pid, blocking: bool) -> GenshinResult<()> {
+        let mut ipc = Self::lock_mutex(&self.ipc_manager)?;
+        let queue_arc = ipc.get_message_queue(pid);
+
+        if let Some(queue_arc) = queue {
+            let mut queue = Self::lock_mutex(queue_arc)?;
+            if let Some(msg) = queue.receive() {
+                println!("ProcessService: Process {} received message: {:?}", pid, msg.message);
+                return Ok(());
+            }
+        }
+
+        if blocking {
+            // Block the process
+            drop(ipc);
+            self.handle_block(pid, 1, BlockReason::WaitingForIo { device_id: 0 })?;
+        }
+
+        println!("ProcessService: Process {} has no messages", pid);
+        Ok(())
+    }
+
+    fn handle_peek_message(&self, pid: Pid) -> GenshinResult<()> {
+        let ipc = Self::lock_mutex(&self.ipc_manager)?;
+        let queue_arc = ipc.get_message_queue(pid);
+
+        if let Some(queue_arc) = queue {
+            let queue = Self::lock_mutex(queue)?;
+            if let Some(msg) = queue.peek() {
+                println!("ProcessService: Process {} has message: {:?}", pid, msg.message);
+                return Ok(());
+            }
+        }
+
+        println!("ProcessService: Process {} has no messages", pid);
+        Ok(())
+    }
+
+    // ========== IPC: Shared Memory Handlers ==========
+
+    fn handle_create_shared_memory(&self, pid: Pid, size: usize, prot: MemProt) -> GenshinResult<()> {
+        let mut ipc = Self::lock_mutex(&self.ipc_manager)?;
+
+        // Allocate physical memory (in real implementation, would request from MemoryService)
+        let physical_addr = 0x1000 + (pid as PhysAddr * 0x1000); // Simplified
+
+        let shmid = ipc.create_shared_memory(pid, size, physical_addr, prot);
+
+        println!("ProcessService: Created shared memory {} for process {} (size: {})", shmid, pid, size);
+        Ok(())
+    }
+
+    fn handle_attach_shared_memory(&self, pid: Pid, shmid: u64) -> GenshinResult<()> {
+        let ipc = Self::lock_mutex(&self.ipc_manager)?;
+
+        // Allocate virtual address
+        let vaddr = 0x5000 + (shmid * 0x1000);
+
+        drop(ipc);
+        let ipc = Self::lock_mutex(&self.ipc_manager)?;
+        ipc.attach_shared_memory(shmid, pid, vaddr)?;
+
+        println!("ProcessService: Process {} attached to shared memory {} at {:#x}", pid, shmid, vaddr);
+        Ok(())
+    }
+
+    fn handle_detach_shared_memory(&self, pid: Pid, shmid: u64) -> GenshinResult<()> {
+        let ipc = Self::lock_mutex(&self.ipc_manager)?;
+        ipc.detach_shared_memory(shmid, pid)?;
+
+        println!("ProcessService: Process {} detached from shared memory {}", pid, shmid);
+        Ok(())
+    }
+
+    // ========== IPC: Synchronization Handlers ==========
+
+    fn handle_create_semaphore(&self, pid: Pid, initial_value: u32) -> GenshinResult<()> {
+        let mut sync = Self::lock_mutex(&self.sync_manager)?;
+        let semid = sync.create_semaphore(pid, initial_value);
+
+        println!("ProcessService: Created semaphore {} for process {} (initial: {})", semid, pid, initial_value);
+        Ok(())
+    }
+
+    fn handle_wait_semaphore(&self, pid: Pid, semid: u64) -> GenshinResult<()> {
+        let sync = Self::lock_mutex(&self.sync_manager)?;
+        if let Some(sem) = sync.get_semaphore(semid) {
+            let result = sem.wait();
+            match result {
+                super::sync::SemaphoreResult::Acquired => {
+                    println!("ProcessService: Process {} acquired semaphore {}", pid, semid);
+                }
+                super::sync::SemaphoreResult::WouldBlock => {
+                    drop(sync);
+                    self.handle_block(pid, 1, BlockReason::WaitingForLock { lock_addr: semid as VirtAddr })?;
+                }
+                _ => {
+                    eprintln!("ProcessService: Semaphore wait error for {}", semid);
+                }
+            }
+        } else {
+            return Err(GenshinError::Service(ServiceError::NotFound {
+                resource_type: "Semaphore".to_string(),
+                id: semid.to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn handle_signal_semaphore(&self, pid: Pid, semid: u64) -> GenshinResult<()> {
+        let sync = Self::lock_mutex(&self.sync_manager)?;
+        if let Some(sem) = sync.get_semaphore(semid) {
+            let result = sem.signal();
+            if let super::sync::SemaphoreResult::Released = result {
+                // Check if any process was waiting
+                // In real implementation, would unblock one waiter
+                println!("ProcessService: Process {} signaled semaphore {}", pid, semid);
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_create_lock(&self, pid: Pid) -> GenshinResult<()> {
+        let mut sync = Self::lock_mutex(&self.sync_manager)?;
+        let lock_id = sync.create_mutex(pid, false);
+
+        println!("ProcessService: Created lock {} for process {}", lock_id, pid);
+        Ok(())
+    }
+
+    fn handle_acquire_lock(&self, pid: Pid, lock_id: u64) -> GenshinResult<()> {
+        let sync = Self::lock_mutex(&self.sync_manager)?;
+        if let Some(mutex) = sync.get_mutex(lock_id) {
+            let result = mutex.try_acquire(pid);
+            match result {
+                super::sync::MutexResult::Acquired => {
+                    println!("ProcessService: Process {} acquired lock {}", pid, lock_id);
+                }
+                super::sync::MutexResult::WouldBlock => {
+                    drop(sync);
+                    self.handle_block(pid, 1, BlockReason::WaitingForLock { lock_addr: lock_id as VirtAddr })?;
+                }
+                _ => {
+                    eprintln!("ProcessService: Lock acquire error for {}", lock_id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_release_lock(&self, pid: Pid, lock_id: u64) -> GenshinResult<()> {
+        let sync = Self::lock_mutex(&self.sync_manager)?;
+        if let Some(mutex) = sync.get_mutex(lock_id) {
+            let result = mutex.release(pid);
+            if let super::sync::MutexResult::Released = result {
+                println!("ProcessService: Process {} released lock {}", pid, lock_id);
+            }
+        }
+        Ok(())
+    }
+
+    // ========== Process Lifecycle Handlers ==========
+
+    fn handle_fork(&self, parent_pid: Pid) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        if !table.contains_key(&parent_pid) {
+            return Err(GenshinError::Service(ServiceError::NotFound {
+                resource_type: "Process".to_string(),
+                id: parent_pid.to_string(),
+            }));
+        }
+
+        drop(table);
+
+        // Create child process
+        let child_pid = self.create_process("(fork)", Vec::new())?;
+
+        // Set up parent-child relationship
+        let mut parent_children = Self::lock_mutex(&self.parent_children)?;
+        parent_children.entry(parent_pid).or_insert_with(Vec::new).push(child_pid);
+
+        println!("ProcessService: Forked {} -> {}", parent_pid, child_pid);
+        Ok(())
+    }
+
+    /// Handle fork with response
+    fn handle_fork_with_response(&self, parent_pid: Pid, envelope: &Envelope) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        if !table.contains_key(&parent_pid) {
+            envelope.respond_error(ServiceError::NotFound {
+                resource: "Process".to_string(),
+                id: parent_pid.to_string(),
+            })?;
+            return Err(GenshinError::Service(ServiceError::NotFound {
+                resource_type: "Process".to_string(),
+                id: parent_pid.to_string(),
+            }));
+        }
+
+        drop(table);
+
+        // Create child process
+        let child_pid = self.create_process("(fork)", Vec::new())?;
+
+        // Set up parent-child relationship
+        let mut parent_children = Self::lock_mutex(&self.parent_children)?;
+        parent_children.entry(parent_pid).or_insert_with(Vec::new).push(child_pid);
+
+        println!("ProcessService: Forked {} -> {}", parent_pid, child_pid);
+
+        // Send success response with child PID
+        envelope.respond_success(ResponseData::Pid(child_pid))?;
+
+        Ok(())
+    }
+
+    fn handle_exec(&self, pid: Pid, executable: String, args: Vec<String>) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        if let Some(pcb) = table.get(&pid) {
+            let mut pcb = Self::lock_mutex(pcb)?;
+            pcb.name = executable.clone();
+            pcb.args = args.clone();
+
+            // Reset process state
+            pcb.state = ProcessState::Ready;
+            None = None;
+
+            println!("ProcessService: Exec {} in process {} ({:?})", executable, pid, args);
+        } else {
+            return Err(GenshinError::Service(ServiceError::NotFound {
+                resource_type: "Process".to_string(),
+                id: pid.to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    /// Handle exec with response
+    fn handle_exec_with_response(&self, pid: Pid, executable: String, args: Vec<String>, envelope: &Envelope) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        if let Some(pcb) = table.get(&pid) {
+            let mut pcb = Self::lock_mutex(pcb)?;
+            pcb.name = executable.clone();
+            pcb.args = args.clone();
+
+            // Reset process state
+            let mut scheduler = Self::lock_mutex(&self.scheduler)?;
+            scheduler.reset_process(pid)?;
+
+            // Clear memory map
+            // TODO: Implement actual memory clearing
+
+            println!("ProcessService: Executed process {} with {}", pid, executable);
+
+            envelope.respond_success(ResponseData::Void)?;
+        } else {
+            envelope.respond_error(ServiceError::NotFound {
+                resource: "Process".to_string(),
+                id: pid.to_string(),
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_wait_child(&self, pid: Pid, child_pid: Option<Pid>) -> GenshinResult<()> {
+        let parent_children = Self::lock_mutex(&self.parent_children)?;
+
+        if let Some(child_pid) = child_pid {
+            // Check if this is our child
+            if let Some(children) = parent_children.get(&pid) {
+                if !children.contains(&child_pid) {
+                    return Err(GenshinError::Service(ServiceError::PermissionDenied { operation: "wait".to_string(), reason: "Not a child".to_string() }));
+                }
+            }
+        } else {
+            // Wait for any child
+            if let Some(children) = parent_children.get(&pid) {
+                if children.is_empty() {
+                    return Err(GenshinError::Service(ServiceError::NotFound {
+                        resource_type: "Child".to_string(),
+                        id: "any".to_string(),
+                    }));
+                }
+            }
+        }
+
+        // Block parent until child exits
+        drop(parent_children);
+        self.handle_block(pid, 1, BlockReason::WaitingForChild { pid: child_pid.unwrap_or(0) })?;
+
+        println!("ProcessService: Process {} waiting for child {:?}", pid, child_pid);
+        Ok(())
+    }
+
+    /// Handle wait child with response
+    fn handle_wait_child_with_response(&self, pid: Pid, child_pid: Option<Pid>, envelope: &Envelope) -> GenshinResult<()> {
+        let parent_children = Self::lock_mutex(&self.parent_children)?;
+
+        // Check if child exists and is a child of parent
+        if let Some(child_pid) = child_pid {
+            if !parent_children.get(&pid).map(|children| children.contains(&child_pid)).unwrap_or(false) {
+                envelope.respond_error(ServiceError::PermissionDenied {
+                    operation: "wait".to_string(),
+                    reason: "Not a child".to_string(),
+                })?;
+                return Ok(());
+            }
+        }
+
+        // Block parent until child exits
+        drop(parent_children);
+        self.handle_block(pid, 1, BlockReason::WaitingForChild { pid: child_pid.unwrap_or(0) })?;
+
+        // For now, we'll immediately return the child exit status
+        // In a real implementation, we'd need to actually wait for the child
+        let child_status = ResponseData::Integer(0); // TODO: Get actual exit status
+
+        println!("ProcessService: Process {} waiting for child {:?}", pid, child_pid);
+
+        envelope.respond_success(child_status)?;
+
+        Ok(())
+    }
+
+    fn handle_signal(&self, pid: Pid, signal: SignalType) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        if let Some(pcb) = table.get(&pid) {
+            let mut pcb = Self::lock_mutex(pcb)?;
+
+            match signal {
+                SignalType::Terminate | SignalType::Kill => {
+                    pcb.state = ProcessState::Terminated { exit_code: 0 };
+                    println!("ProcessService: Terminated process {} ({})", pid, signal);
+                }
+                SignalType::Stop => {
+                    pcb.state = ProcessState::Blocked(BlockReason::WaitingForIo { device_id: 0 });
+                    println!("ProcessService: Stopped process {}", pid);
+                }
+                SignalType::Continue => {
+                    pcb.state = ProcessState::Ready;
+                    println!("ProcessService: Continued process {}", pid);
+                }
+                _ => {
+                    pcb.pending_signals.push(signal);
+                    println!("ProcessService: Queued signal {} for process {}", signal, pid);
+                }
+            }
+        } else {
+            return Err(GenshinError::Service(ServiceError::NotFound {
+                resource_type: "Process".to_string(),
+                id: pid.to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn handle_get_process_info(&self, pid: Pid) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        if let Some(pcb) = table.get(&pid) {
+            let pcb = Self::lock_mutex(pcb)?;
+            println!("ProcessService: Process {} info:", pid);
+            println!("  Executable: {}", pcb.name);
+            println!("  State: {:?}", pcb.state);
+            println!("  Threads: {}", pcb.threads.len());
+            println!("  Parent: {:?}", pcb.parent_pid);
+        } else {
+            return Err(GenshinError::Service(ServiceError::NotFound {
+                resource_type: "Process".to_string(),
+                id: pid.to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    /// Handle get process info with response
+    fn handle_get_process_info_with_response(&self, pid: Pid, envelope: &Envelope) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        if let Some(pcb) = table.get(&pid) {
+            let pcb = Self::lock_mutex(pcb)?;
+
+            // Create process info string
+            let info = format!("PID: {}, Executable: {}, State: {:?}, Threads: {}",
+                pid, pcb.name, pcb.state, pcb.threads.len());
+
+            println!("ProcessService: Process {} info: {}", pid, info);
+
+            envelope.respond_success(ResponseData::String(info))?;
+        } else {
+            envelope.respond_error(ServiceError::NotFound {
+                resource: "Process".to_string(),
+                id: pid.to_string(),
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_list_processes(&self) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        println!("ProcessService: Process list:");
+        for pid in table.keys() {
+            println!("  PID {}", pid);
+        }
+        Ok(())
+    }
+
+    // ========== Helper Methods ==========
+
+    /// Helper to lock a Mutex and convert PoisonError
+    fn lock_mutex<T>(mutex: &Mutex<T>) -> GenshinResult<std::sync::MutexGuard<T>> {
+        mutex.lock().map_err(|e| {
+            GenshinError::Service(ServiceError::InvalidArguments {
+                param: "mutex".to_string(),
+                reason: format!("Mutex poisoned: {}", e)
+            })
+        })
+    }
+
+    /// Create a new process
+    fn create_process(&self, executable: &str, args: Vec<String>) -> GenshinResult<Pid> {
+        let mut next_pid = self.next_pid.lock().map_err(|e| {
+            GenshinError::Service(ServiceError::InvalidArguments {
+                param: "lock".to_string(),
+                reason: format!("Failed to acquire lock: {}", e)
+            })
+        })?;
+        let pid = *next_pid;
+        *next_pid += 1;
+
+        // Create PCB with no parent (for root processes)
+        let mut pcb = PCB::new(pid, executable.to_string(), None);
+        pcb.args = args; // Set arguments after creation
+
+        // Store in process table
+        let mut table = self.process_table.lock().map_err(|e| {
+            GenshinError::Service(ServiceError::InvalidArguments {
+                param: "process_table".to_string(),
+                reason: format!("Failed to acquire lock: {}", e)
+            })
+        })?;
+        table.insert(pid, Arc::new(Mutex::new(pcb)));
+
+        // Add to scheduler
+        drop(table);
+        self.handle_schedule(pid, 1)?;
+
+        Ok(pid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::messaging::LockedBus;
+
+    #[test]
+    fn test_process_service_creation() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        // Service should be created successfully
+        assert_eq!(service.process_table.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_create_process() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus.clone());
+
+        // Create process via syscall
+        let msg = KernelMsg::Syscall(Syscall::CreateProcess {
+            executable: "/bin/test".to_string(),
+            args: vec!["--help".to_string()],
+        });
+
+        bus.send(msg).unwrap();
+
+        // Give service time to process
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Process should be created
+        let table = service.process_table.lock().unwrap();
+        assert!(!table.is_empty());
+    }
+
+    #[test]
+    fn test_process_schedule() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        // Create a process first
+        let pid = service.create_process("/bin/sched", Vec::new()).unwrap();
+
+        // Schedule it
+        let result = service.handle_schedule(pid, 1);
+        assert!(result.is_ok());
+
+        // Check scheduler state
+        let scheduler = service.scheduler.lock().unwrap();
+        assert!(scheduler.has_ready());
+    }
+
+    #[test]
+    fn test_process_block_unblock() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        // Create a process
+        let pid = service.create_process("/bin/block", Vec::new()).unwrap();
+
+        // Block it
+        let result = service.handle_block(pid, 1, BlockReason::WaitingForIo { device_id: 1 });
+        assert!(result.is_ok());
+
+        // Check state
+        let table = service.process_table.lock().unwrap();
+        let pcb = table.get(&pid).unwrap().lock().unwrap();
+        assert_eq!(pcb.state, ProcessState::Blocked(BlockReason::WaitingForIo { device_id: 0 }));
+        drop(pcb);
+        drop(table);
+
+        // Unblock it
+        let result = service.handle_unblock(pid, 1);
+        assert!(result.is_ok());
+
+        // Check state again
+        let table = service.process_table.lock().unwrap();
+        let pcb = table.get(&pid).unwrap().lock().unwrap();
+        assert_eq!(pcb.state, ProcessState::Ready);
+    }
+
+    #[test]
+    fn test_send_receive_message() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        // Create two processes
+        let pid1 = service.create_process("/bin/sender", Vec::new()).unwrap();
+        let pid2 = service.create_process("/bin/receiver", Vec::new()).unwrap();
+
+        // Send message
+        let msg = IPCMessage::Text { data: "Hello!".to_string() };
+        let result = service.handle_send_message(pid1, pid2, msg);
+        assert!(result.is_ok());
+
+        // Receive message
+        let result = service.handle_receive_message(pid2, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_shared_memory() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        let pid = service.create_process("/bin/shm", Vec::new()).unwrap();
+
+        // Create shared memory
+        let result = service.handle_create_shared_memory(pid, 4096, MemProt::read_write());
+        assert!(result.is_ok());
+
+        // Attach to it (shmid would be 1)
+        let result = service.handle_attach_shared_memory(pid, 1);
+        assert!(result.is_ok());
+
+        // Detach from it
+        let result = service.handle_detach_shared_memory(pid, 1);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_semaphore() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        let pid = service.create_process("/bin/sem", Vec::new()).unwrap();
+
+        // Create semaphore
+        let result = service.handle_create_semaphore(pid, 2);
+        assert!(result.is_ok());
+
+        // Wait on semaphore (semid would be 1)
+        let result = service.handle_wait_semaphore(pid, 1);
+        assert!(result.is_ok());
+
+        // Signal semaphore
+        let result = service.handle_signal_semaphore(pid, 1);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mutex_lock() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        let pid = service.create_process("/bin/mutex", Vec::new()).unwrap();
+
+        // Create mutex
+        let result = service.handle_create_lock(pid);
+        assert!(result.is_ok());
+
+        // Acquire lock (lock_id would be 1)
+        let result = service.handle_acquire_lock(pid, 1);
+        assert!(result.is_ok());
+
+        // Release lock
+        let result = service.handle_release_lock(pid, 1);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_signal_handling() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        let pid = service.create_process("/bin/signal", Vec::new()).unwrap();
+
+        // Send stop signal
+        let result = service.handle_signal(pid, SignalType::Stop);
+        assert!(result.is_ok());
+
+        // Check state
+        let table = service.process_table.lock().unwrap();
+        let pcb = table.get(&pid).unwrap().lock().unwrap();
+        assert_eq!(pcb.state, ProcessState::Blocked(BlockReason::WaitingForIo { device_id: 0 }));
+        drop(pcb);
+        drop(table);
+
+        // Send continue signal
+        let result = service.handle_signal(pid, SignalType::Continue);
+        assert!(result.is_ok());
+
+        // Check state again
+        let table = service.process_table.lock().unwrap();
+        let pcb = table.get(&pid).unwrap().lock().unwrap();
+        assert_eq!(pcb.state, ProcessState::Ready);
+    }
+
+    #[test]
+    fn test_fork_process() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        let parent_pid = service.create_process("/bin/parent", Vec::new()).unwrap();
+
+        // Fork
+        let result = service.handle_fork(parent_pid);
+        assert!(result.is_ok());
+
+        // Check parent-child relationship
+        let parent_children = service.parent_children.lock().unwrap();
+        assert!(parent_children.contains_key(&parent_pid));
+        assert!(!parent_children.get(&parent_pid).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_exec_process() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        let pid = service.create_process("/bin/original", Vec::new()).unwrap();
+
+        // Exec new program
+        let result = service.handle_exec(
+            pid,
+            "/bin/new".to_string(),
+            vec!["--arg1".to_string(), "--arg2".to_string()],
+        );
+        assert!(result.is_ok());
+
+        // Check PCB was updated
+        let table = service.process_table.lock().unwrap();
+        let pcb = table.get(&pid).unwrap().lock().unwrap();
+        assert_eq!(pcb.name, "/bin/new");
+        assert_eq!(pcb.args.len(), 2);
+    }
+
+    #[test]
+    fn test_query_state() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        let pid = service.create_process("/bin/query", Vec::new()).unwrap();
+
+        // Query state
+        let result = service.handle_query_state(pid);
+        assert!(result.is_ok());
+
+        // Query non-existent process
+        let result = service.handle_query_state(9999);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_list_processes() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        // Create some processes
+        let _ = service.create_process("/bin/p1", Vec::new()).unwrap();
+        let _ = service.create_process("/bin/p2", Vec::new()).unwrap();
+
+        // List processes
+        let result = service.handle_list_processes();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_timer_interrupt() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        // Create a process
+        let _ = service.create_process("/bin/timer", Vec::new()).unwrap();
+
+        // Simulate timer interrupt
+        let result = service.handle_timer_interrupt();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_process_info() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        let pid = service.create_process("/bin/info", Vec::new()).unwrap();
+
+        // Get process info
+        let result = service.handle_get_process_info(pid);
+        assert!(result.is_ok());
+
+        // Get info for non-existent process
+        let result = service.handle_get_process_info(9999);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_peek_message() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        let pid = service.create_process("/bin/peek", Vec::new()).unwrap();
+
+        // Peek at empty queue
+        let result = service.handle_peek_message(pid);
+        assert!(result.is_ok());
+
+        // Send a message
+        let msg = IPCMessage::Text { data: "Test".to_string() };
+        let _ = service.handle_send_message(pid, pid, msg);
+
+        // Peek again
+        let result = service.handle_peek_message(pid);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_multiple_thread_schedule() {
+        let bus = Arc::new(LockedBus::new());
+        let service = ProcessService::new(bus);
+
+        let pid = service.create_process("/bin/threads", Vec::new()).unwrap();
+
+        // Schedule multiple threads
+        let result1 = service.handle_schedule(pid, 1);
+        let result2 = service.handle_schedule(pid, 2);
+        let result3 = service.handle_schedule(pid, 3);
+
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+        assert!(result3.is_ok());
+
+        // Check scheduler
+        let scheduler = service.scheduler.lock().unwrap();
+        assert_eq!(scheduler.ready_count(), 3);
+    }
+}

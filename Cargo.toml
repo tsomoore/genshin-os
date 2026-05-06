@@ -3,6 +3,10 @@ name = "genshin-os"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "chao-os"
+path = "src/main.rs"
+
 [dependencies]
 crossbeam-channel = "0.5"
 thiserror = "2.0"

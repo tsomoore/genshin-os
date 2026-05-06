@@ -550,6 +550,17 @@ impl fmt::Display for BusError {
 
 impl std::error::Error for BusError {}
 
+// Import for crossbeam channel support
+use crate::messaging::Response;
+
+impl From<crossbeam_channel::SendError<Response>> for GenshinError {
+    fn from(err: crossbeam_channel::SendError<Response>) -> Self {
+        Self::Bus(BusError::SendFailed {
+            reason: format!("Channel send error: {}", err),
+        })
+    }
+}
+
 /// Convenience type alias for Result
 pub type Result<T> = std::result::Result<T, GenshinError>;
 

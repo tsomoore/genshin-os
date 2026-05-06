@@ -4,7 +4,7 @@
 // All inter-module communication MUST use KernelMsg via MessageBus.
 
 mod msg;
-mod bus;
+pub mod bus;
 mod response;
 
 pub use msg::{KernelMsg, Syscall, Interrupt};
@@ -13,7 +13,7 @@ pub use msg::{ProcessRequest, BlockReason, IPCMessage, SignalType};
 pub use msg::{MemoryRequest};
 pub use msg::{FileRequest, OpenFlags, FileSystemType, SeekWhence};
 pub use msg::{DeviceRequest, DeviceClass, DeviceConfig};
-pub use bus::{MessageBus, LockedBus, BusError, DirectBus, DirectBusSender, DirectBusReceiver};
+pub use bus::{MessageBus, LockedBus, BusError, DirectBus, DirectBusSender, DirectBusReceiver, Envelope};
 
 // Response mechanism
 pub use response::{
