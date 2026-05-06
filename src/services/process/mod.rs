@@ -10,11 +10,11 @@ pub mod pcb;
 pub mod ipc;
 pub mod sync;
 pub mod scheduler;
-// pub mod service;  // Temporarily disabled due to compilation errors
+pub mod service;
 
 // Re-export key types
 pub use pcb::{PCB, TCB, ProcessState, ThreadState};
 pub use ipc::{MessageQueue, SharedMemoryRegion};
 pub use sync::{Semaphore, MutexLock};
 pub use scheduler::{Scheduler, SchedulingPolicy, SchedulingDecision};
-// pub use service::ProcessService;  // Temporarily disabled
+pub use service::ProcessService;

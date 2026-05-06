@@ -48,6 +48,7 @@
 
 | 文档 | 说明 | 重要性 |
 |------|------|--------|
+|| **[🎯 ProcessService 设计文档](./PROCESS_SERVICE.md)** | 进程管理服务完整设计：架构、组件、API、调度器、线程安全 | ⭐⭐⭐ |
 | **[硬件层与内核服务层协作指南](./HARDWARE_SERVICE_COORDINATION.md)** | 消息总线工作原理、消息传递流程、接口说明、实现框架 | ⭐⭐⭐ |
 | **[IPC 消息格式文档](./IPC_MESSAGE_FORMAT.md)** | 进程间通信协议、消息类型、同步原语、使用示例 | ⭐⭐⭐ |
 | **[File System 和 Device Manager 硬件支持指南](./FILE_SYSTEM_DEVICE_MANAGER_GUIDE.md)** | 块设备、分区、通用设备接口、文件系统和设备管理器消息协议 | ⭐⭐⭐ |
@@ -304,6 +305,7 @@ println!("CPU: {:#?}", state);
 
 | 日期 | 版本 | 更新内容 |
 |------|------|---------|
+|| 2026-05-06 | 4.0 | 新增 ProcessService 设计与实现文档、修复并启用 ProcessService 模块 |
 | 2026-03-24 | 3.0 | 添加 File System 和 Device Manager 硬件支持指南、块设备和设备管理器示例 |
 | 2026-03-24 | 2.0 | 添加硬件层与内核服务层协作指南、IPC 消息格式文档 |
 | 2026-03-23 | 1.0 | 初始版本，完整接口文档 |

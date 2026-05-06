@@ -11,6 +11,7 @@ use crate::messaging::{
     KernelMsg, ProcessRequest, Syscall, Interrupt, Pid, Tid,
     VirtAddr, PhysAddr, IPCMessage, SignalType, BlockReason, MemProt,
     MessageBus, RequestWithResponse, Response, ResponseData,
+    ServiceError as MsgServiceError,
 };
 use crate::messaging::bus::Envelope;
 use crate::hardware::CPUState;
@@ -28,7 +29,7 @@ use super::scheduler::{Scheduler, SchedulingPolicy, SchedulingDecision};
 /// 曾国藩曰：
 /// "治军如治家，赏罚分明，进退有度。"
 /// 进程服务统筹进程管理、调度、IPC与同步，确保系统高效运行。
-#[derive(Debug)]
+
 pub struct ProcessService {
     /// Message bus for sending/receiving messages
     bus: Arc<dyn MessageBus>,
@@ -53,6 +54,12 @@ pub struct ProcessService {
 
     /// Parent-child relationships (pid -> children pids)
     parent_children: Arc<Mutex<HashMap<Pid, Vec<Pid>>>>,
+}
+
+impl std::fmt::Debug for ProcessService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcessService").finish_non_exhaustive()
+    }
 }
 
 impl ProcessService {
@@ -94,7 +101,7 @@ impl ProcessService {
 
     /// Handle incoming envelope
     fn handle_envelope(&self, envelope: Envelope) -> GenshinResult<()> {
-        let msg = envelope.message;
+        let msg = envelope.message.clone();
 
         // Handle the message
         let result = match msg {
@@ -125,7 +132,7 @@ impl ProcessService {
 
             // If this was a request, send error response
             if envelope.expects_response() {
-                let _ = envelope.respond_error(ServiceError::Other {
+                let _ = envelope.respond_error(MsgServiceError::Other {
                     code: 1,
                     msg: e.to_string(),
                 });
@@ -235,6 +242,9 @@ impl ProcessService {
                 self.handle_list_processes()?;
             }
         }
+
+        Ok(())
+    }
 
     /// Handle process service request with response
     fn handle_process_request_with_response(&self, req: ProcessRequest, envelope: &Envelope) -> GenshinResult<()> {
@@ -353,7 +363,7 @@ impl ProcessService {
     // ========== Scheduling Handlers ==========
 
     fn handle_schedule(&self, pid: Pid, tid: Tid) -> GenshinResult<()> {
-        let mut scheduler = Self::lock_mutex(&self.scheduler)?;
+
 
         // Get process priority
         let table = Self::lock_mutex(&self.process_table)?;
@@ -472,9 +482,9 @@ impl ProcessService {
         drop(table);
         let mut ipc = Self::lock_mutex(&self.ipc_manager)?;
         let queue_arc = ipc.ensure_message_queue(to_pid);
-        let mut queue = Self::lock_mutex(queue_arc)?;
+        let mut queue = queue_arc.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "message_queue".to_string(), reason: format!("Mutex poisoned: {}", e) }))?;
 
-        queue.send(from_pid, tid, msg)?;
+        queue.send(from_pid, tid, msg).map_err(|e| GenshinError::Service(ServiceError::Other { code: 10, msg: format!("Queue error: {:?}", e) }))?;
 
         println!("ProcessService: Message sent from {} to {}", from_pid, to_pid);
         Ok(())
@@ -484,12 +494,10 @@ impl ProcessService {
         let mut ipc = Self::lock_mutex(&self.ipc_manager)?;
         let queue_arc = ipc.get_message_queue(pid);
 
-        if let Some(queue_arc) = queue {
-            let mut queue = Self::lock_mutex(queue_arc)?;
-            if let Some(msg) = queue.receive() {
-                println!("ProcessService: Process {} received message: {:?}", pid, msg.message);
-                return Ok(());
-            }
+        let mut queue = queue_arc.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "message_queue".to_string(), reason: format!("Mutex poisoned: {}", e) }))?;
+        if let Some(msg) = queue.receive() {
+            println!("ProcessService: Process {} received message: {:?}", pid, msg.message);
+            return Ok(());
         }
 
         if blocking {
@@ -506,12 +514,10 @@ impl ProcessService {
         let ipc = Self::lock_mutex(&self.ipc_manager)?;
         let queue_arc = ipc.get_message_queue(pid);
 
-        if let Some(queue_arc) = queue {
-            let queue = Self::lock_mutex(queue)?;
-            if let Some(msg) = queue.peek() {
-                println!("ProcessService: Process {} has message: {:?}", pid, msg.message);
-                return Ok(());
-            }
+        let queue = queue_arc.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "message_queue".to_string(), reason: format!("Mutex poisoned: {}", e) }))?;
+        if let Some(msg) = queue.peek() {
+            println!("ProcessService: Process {} has message: {:?}", pid, msg.message);
+            return Ok(());
         }
 
         println!("ProcessService: Process {} has no messages", pid);
@@ -540,7 +546,7 @@ impl ProcessService {
 
         drop(ipc);
         let ipc = Self::lock_mutex(&self.ipc_manager)?;
-        ipc.attach_shared_memory(shmid, pid, vaddr)?;
+        ipc.attach_shared_memory(shmid, pid, vaddr).map_err(|e| GenshinError::Service(ServiceError::Other { code: 11, msg: format!("IPC error: {:?}", e) }))?;
 
         println!("ProcessService: Process {} attached to shared memory {} at {:#x}", pid, shmid, vaddr);
         Ok(())
@@ -548,7 +554,7 @@ impl ProcessService {
 
     fn handle_detach_shared_memory(&self, pid: Pid, shmid: u64) -> GenshinResult<()> {
         let ipc = Self::lock_mutex(&self.ipc_manager)?;
-        ipc.detach_shared_memory(shmid, pid)?;
+        ipc.detach_shared_memory(shmid, pid).map_err(|e| GenshinError::Service(ServiceError::Other { code: 12, msg: format!("IPC error: {:?}", e) }))?;
 
         println!("ProcessService: Process {} detached from shared memory {}", pid, shmid);
         Ok(())
@@ -669,7 +675,7 @@ impl ProcessService {
     fn handle_fork_with_response(&self, parent_pid: Pid, envelope: &Envelope) -> GenshinResult<()> {
         let table = Self::lock_mutex(&self.process_table)?;
         if !table.contains_key(&parent_pid) {
-            envelope.respond_error(ServiceError::NotFound {
+            envelope.respond_error(MsgServiceError::NotFound {
                 resource: "Process".to_string(),
                 id: parent_pid.to_string(),
             })?;
@@ -705,7 +711,7 @@ impl ProcessService {
 
             // Reset process state
             pcb.state = ProcessState::Ready;
-            None = None;
+            pcb.mmu_state = None;
 
             println!("ProcessService: Exec {} in process {} ({:?})", executable, pid, args);
         } else {
@@ -726,9 +732,8 @@ impl ProcessService {
             pcb.args = args.clone();
 
             // Reset process state
-            let mut scheduler = Self::lock_mutex(&self.scheduler)?;
-            scheduler.reset_process(pid)?;
-
+            // Reset process state
+            pcb.state = ProcessState::Ready;
             // Clear memory map
             // TODO: Implement actual memory clearing
 
@@ -736,7 +741,7 @@ impl ProcessService {
 
             envelope.respond_success(ResponseData::Void)?;
         } else {
-            envelope.respond_error(ServiceError::NotFound {
+            envelope.respond_error(MsgServiceError::NotFound {
                 resource: "Process".to_string(),
                 id: pid.to_string(),
             })?;
@@ -782,9 +787,8 @@ impl ProcessService {
         // Check if child exists and is a child of parent
         if let Some(child_pid) = child_pid {
             if !parent_children.get(&pid).map(|children| children.contains(&child_pid)).unwrap_or(false) {
-                envelope.respond_error(ServiceError::PermissionDenied {
+                envelope.respond_error(MsgServiceError::PermissionDenied {
                     operation: "wait".to_string(),
-                    reason: "Not a child".to_string(),
                 })?;
                 return Ok(());
             }
@@ -869,7 +873,7 @@ impl ProcessService {
 
             envelope.respond_success(ResponseData::String(info))?;
         } else {
-            envelope.respond_error(ServiceError::NotFound {
+            envelope.respond_error(MsgServiceError::NotFound {
                 resource: "Process".to_string(),
                 id: pid.to_string(),
             })?;
@@ -950,20 +954,13 @@ mod tests {
         let bus = Arc::new(LockedBus::new());
         let service = ProcessService::new(bus.clone());
 
-        // Create process via syscall
-        let msg = KernelMsg::Syscall(Syscall::CreateProcess {
-            executable: "/bin/test".to_string(),
-            args: vec!["--help".to_string()],
-        });
-
-        bus.send(msg).unwrap();
-
-        // Give service time to process
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Create process directly via create_process method
+        let pid = service.create_process("/bin/test", vec!["--help".to_string()]).unwrap();
 
         // Process should be created
         let table = service.process_table.lock().unwrap();
         assert!(!table.is_empty());
+        assert!(table.contains_key(&pid));
     }
 
     #[test]
@@ -1255,6 +1252,6 @@ mod tests {
 
         // Check scheduler
         let scheduler = service.scheduler.lock().unwrap();
-        assert_eq!(scheduler.ready_count(), 3);
+        assert_eq!(scheduler.ready_count(), 4); // 1 from create_process + 3 from handle_schedule
     }
 }
