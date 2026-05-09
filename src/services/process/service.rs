@@ -945,10 +945,10 @@ impl ProcessService {
             let base = self.alloc_frame()?;
             use crate::hardware::VirtualCPU;
             // Map page
-            let _ = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
+            if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
                 pid, virt: 0, phys: base,
                 prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
-            }));
+            })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
             self.write_slice_virt(pid, 0, &code);
             let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
             cpu.set_pc(0); cpu.set_sp(0xFFFF);
