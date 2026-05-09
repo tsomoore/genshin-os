@@ -925,34 +925,61 @@ impl ProcessService {
         })
     }
 
-    /// Create a new process
+    fn load_program(&self, name: &str) -> Option<Vec<u8>> {
+        // Try assembler file first
+        let path = format!("programs/{}.asm", name);
+        if let Ok((_, code)) = super::assembler::assemble_file(&path) {
+            println!("PS: Loaded {}", path);
+            return Some(code);
+        }
+        // Fall back to hardcoded (add, sub, etc.)
+        match name {
+            "add" => Some(vec![0x01,0x00,0x01,0x00,0x0A,0x00,0x00,0x00,0x01,0x01,0x01,0x00,0x14,0x00,0x00,0x00,0x02,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x02,0x00,0x00,0x01,0x00,0x00,0x00,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00]),
+            _ => None,
+        }
+    }
+
     fn create_process(&self, executable: &str, args: Vec<String>) -> GenshinResult<Pid> {
         let mut next_pid = self.next_pid.lock().map_err(|e| {
-            GenshinError::Service(ServiceError::InvalidArguments {
-                param: "lock".to_string(),
-                reason: format!("Failed to acquire lock: {}", e)
-            })
+            GenshinError::Service(ServiceError::InvalidArguments { param: "lock".into(), reason: format!("{}", e) })
         })?;
-        let pid = *next_pid;
-        *next_pid += 1;
+        let pid = *next_pid; *next_pid += 1; drop(next_pid);
 
-        // Create PCB with no parent (for root processes)
-        let mut pcb = PCB::new(pid, executable.to_string(), None);
-        pcb.args = args; // Set arguments after creation
-
-        // Store in process table
-        let mut table = self.process_table.lock().map_err(|e| {
-            GenshinError::Service(ServiceError::InvalidArguments {
-                param: "process_table".to_string(),
-                reason: format!("Failed to acquire lock: {}", e)
-            })
-        })?;
-        table.insert(pid, Arc::new(Mutex::new(pcb)));
-
-        // Add to scheduler
-        drop(table);
-        self.handle_schedule(pid, 1)?;
-
+        if let Some(code) = self.load_program(executable) {
+            let base = (pid as u64) * 0x40000;
+            use crate::hardware::VirtualCPU;
+            // Map page
+            let _ = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
+                pid, virt: 0, phys: base,
+                prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
+            }));
+            self.write_slice_virt(pid, 0, &code);
+            let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
+            cpu.set_pc(0); cpu.set_sp(0xFFFF);
+            { let mut c = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?; c.insert(pid, cpu); }
+            let mut pcb = PCB::new(pid, executable.to_string(), None);
+            pcb.args = args; pcb.state = ProcessState::Ready;
+            self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
+                .insert(pid, Arc::new(Mutex::new(pcb)));
+            self.handle_schedule(pid, 1)?;
+            for _ in 0..100 {
+                if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() { break; } } else { break; }
+                let _ = self.handle_timer_interrupt();
+            }
+            let mut cpus = self.cpus.lock().unwrap();
+            if let Some(cpu) = cpus.remove(&pid) {
+                println!("PS: '{}' done after {} instructions", executable, cpu.dump_state().instruction_count);
+            }
+            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
+            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
+        } else {
+            let mut pcb = PCB::new(pid, executable.to_string(), None);
+            pcb.args = args;
+            self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
+                .insert(pid, Arc::new(Mutex::new(pcb)));
+            self.handle_schedule(pid, 1)?;
+            println!("PS: Created {} (no code)", pid);
+        }
         Ok(pid)
     }
 
@@ -1101,10 +1128,17 @@ mod tests {
     use super::*;
     use crate::messaging::LockedBus;
 
+    fn make_service() -> ProcessService {
+        let bus = Arc::new(LockedBus::new());
+        let mem = crate::hardware::PhysicalMemory::new(1024 * 1024);
+        let mmu = Arc::new(crate::hardware::MMU::new(mem.clone(), 4096));
+        ProcessService::new(bus, mem, mmu)
+    }
+
     #[test]
     fn test_process_service_creation() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         // Service should be created successfully
         assert_eq!(service.process_table.lock().unwrap().len(), 0);
@@ -1113,7 +1147,7 @@ mod tests {
     #[test]
     fn test_create_process() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus.clone());
+        let service = make_service();
 
         // Create process directly via create_process method
         let pid = service.create_process("/bin/test", vec!["--help".to_string()]).unwrap();
@@ -1127,7 +1161,7 @@ mod tests {
     #[test]
     fn test_process_schedule() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         // Create a process first
         let pid = service.create_process("/bin/sched", Vec::new()).unwrap();
@@ -1144,7 +1178,7 @@ mod tests {
     #[test]
     fn test_process_block_unblock() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         // Create a process
         let pid = service.create_process("/bin/block", Vec::new()).unwrap();
@@ -1173,7 +1207,7 @@ mod tests {
     #[test]
     fn test_send_receive_message() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         // Create two processes
         let pid1 = service.create_process("/bin/sender", Vec::new()).unwrap();
@@ -1192,7 +1226,7 @@ mod tests {
     #[test]
     fn test_shared_memory() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         let pid = service.create_process("/bin/shm", Vec::new()).unwrap();
 
@@ -1212,7 +1246,7 @@ mod tests {
     #[test]
     fn test_semaphore() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         let pid = service.create_process("/bin/sem", Vec::new()).unwrap();
 
@@ -1232,7 +1266,7 @@ mod tests {
     #[test]
     fn test_mutex_lock() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         let pid = service.create_process("/bin/mutex", Vec::new()).unwrap();
 
@@ -1252,7 +1286,7 @@ mod tests {
     #[test]
     fn test_signal_handling() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         let pid = service.create_process("/bin/signal", Vec::new()).unwrap();
 
@@ -1280,7 +1314,7 @@ mod tests {
     #[test]
     fn test_fork_process() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         let parent_pid = service.create_process("/bin/parent", Vec::new()).unwrap();
 
@@ -1297,7 +1331,7 @@ mod tests {
     #[test]
     fn test_exec_process() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         let pid = service.create_process("/bin/original", Vec::new()).unwrap();
 
@@ -1319,7 +1353,7 @@ mod tests {
     #[test]
     fn test_query_state() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         let pid = service.create_process("/bin/query", Vec::new()).unwrap();
 
@@ -1335,7 +1369,7 @@ mod tests {
     #[test]
     fn test_list_processes() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         // Create some processes
         let _ = service.create_process("/bin/p1", Vec::new()).unwrap();
@@ -1349,7 +1383,7 @@ mod tests {
     #[test]
     fn test_timer_interrupt() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         // Create a process
         let _ = service.create_process("/bin/timer", Vec::new()).unwrap();
@@ -1362,7 +1396,7 @@ mod tests {
     #[test]
     fn test_get_process_info() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         let pid = service.create_process("/bin/info", Vec::new()).unwrap();
 
@@ -1378,7 +1412,7 @@ mod tests {
     #[test]
     fn test_peek_message() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         let pid = service.create_process("/bin/peek", Vec::new()).unwrap();
 
@@ -1398,7 +1432,7 @@ mod tests {
     #[test]
     fn test_multiple_thread_schedule() {
         let bus = Arc::new(LockedBus::new());
-        let service = ProcessService::new(bus);
+        let service = make_service();
 
         let pid = service.create_process("/bin/threads", Vec::new()).unwrap();
 
