@@ -54,6 +54,8 @@ pub struct ProcessService {
 
     /// Parent-child relationships (pid -> children pids)
     parent_children: Arc<Mutex<HashMap<Pid, Vec<Pid>>>>,
+    _hw: crate::hardware::PhysicalMemory,
+    _mmu: Arc<crate::hardware::MMU>,
 }
 
 impl std::fmt::Debug for ProcessService {
@@ -64,7 +66,7 @@ impl std::fmt::Debug for ProcessService {
 
 impl ProcessService {
     /// Create a new process service
-    pub fn new(bus: Arc<dyn MessageBus>) -> Self {
+    pub fn new(bus: Arc<dyn MessageBus>, hw: crate::hardware::PhysicalMemory, mmu: Arc<crate::hardware::MMU>) -> Self {
         let receiver = bus.subscribe();
 
         Self {
@@ -76,6 +78,7 @@ impl ProcessService {
             sync_manager: Arc::new(Mutex::new(SyncManager::new())),
             scheduler: Arc::new(Mutex::new(Scheduler::round_robin(10))),
             parent_children: Arc::new(Mutex::new(HashMap::new())),
+            _hw: hw, _mmu: mmu,
         }
     }
 
@@ -241,6 +244,7 @@ impl ProcessService {
             ProcessRequest::ListProcesses => {
                 self.handle_list_processes()?;
             }
+            ProcessRequest::Spawn { .. } => {}
         }
 
         Ok(())
@@ -264,6 +268,10 @@ impl ProcessService {
 
             ProcessRequest::GetProcessInfo { pid } => {
                 self.handle_get_process_info_with_response(pid, envelope)?;
+            }
+
+            ProcessRequest::Spawn { program, params } => {
+                self.handle_spawn(program, params, envelope)?;
             }
 
             _ => {
@@ -932,6 +940,128 @@ impl ProcessService {
         self.handle_schedule(pid, 1)?;
 
         Ok(pid)
+    }
+
+    fn handle_spawn(&self, program: String, params: Vec<u8>, envelope: &Envelope) -> GenshinResult<()> {
+        use crate::hardware::{PageFlags, VirtualCPU};
+        let pid = { let mut n = self.next_pid.lock().unwrap(); let p = *n; *n += 1; p };
+        let base = (pid as u64) * 0x40000;
+
+        // Map page
+        self._mmu.map_page(pid, 0, base, PageFlags { present: true, writable: true, user_accessible: true }).ok();
+
+        // Write params
+        if !params.is_empty() {
+            if let Some(null_pos) = params.iter().position(|&b| b == 0) {
+                self.write_slice_virt(pid, 0x100, &params[..null_pos]);
+                if null_pos + 1 < params.len() {
+                    self.write_slice_virt(pid, 0x200, &params[null_pos + 1..]);
+                }
+            } else {
+                self.write_slice_virt(pid, 0x100, &params);
+            }
+        }
+
+        let prog = self.gen_builtin_program(&program, params.len());
+        self.write_slice_virt(pid, 0, &prog);
+
+        let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
+        cpu.set_pc(0); cpu.set_sp(0xFFFF);
+        println!("PS: Spawn '{}' (PID {}, {} bytes)", program, pid, prog.len());
+
+        loop {
+            if cpu.is_halted() { break; }
+            if cpu.step().is_err() { cpu.halt(); break; }
+            while let Ok(env) = self.receiver.try_recv() {
+                if let KernelMsg::Interrupt(crate::messaging::Interrupt::SyscallTrap) = &env.message {
+                    let st = cpu.dump_state();
+                    self.handle_file_syscall(&mut cpu, st.registers[0], st.registers[1], st.registers[2]);
+                    if cpu.is_halted() { break; }
+                }
+            }
+        }
+        println!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
+        let _ = envelope.respond_success(ResponseData::Void);
+        Ok(())
+    }
+
+    fn gen_builtin_program(&self, name: &str, data_len: usize) -> Vec<u8> {
+        let halt = vec![0x01,0x00,0x01,0x00, 0x00,0x00,0x00,0x00, 0x80,0x00,0x00,0x00, 0x80,0x00,0x00,0x00];
+        let int = vec![0x80,0x00,0x00,0x00, 0x80,0x00,0x00,0x00];
+        let mov = |r: u8, v: u8| vec![0x01, r, 0x01, 0x00, v, 0x00, 0x00, 0x00];
+        match name {
+            "ls"|"listdir" => [&mov(0, 18)[..], &int[..], &halt[..]].concat(),
+            "mkdir" => [&mov(0, 14)[..], &int[..], &halt[..]].concat(),
+            "rm"|"unlink" => [&mov(0, 16)[..], &int[..], &halt[..]].concat(),
+            "touch"|"open" => [&mov(1, 1)[..], &mov(0, 10)[..], &int[..], &mov(0, 11)[..], &int[..], &halt[..]].concat(),
+            "cat"|"read" => [&mov(0, 10)[..], &int[..], &mov(0, 12)[..], &mov(2, 0x10)[..], &int[..], &mov(0, 11)[..], &int[..], &halt[..]].concat(),
+            "write" => [&mov(1, 1)[..], &mov(0, 10)[..], &int[..], &mov(0, 13)[..], &mov(2, data_len as u8)[..], &int[..], &mov(0, 11)[..], &int[..], &halt[..]].concat(),
+            "stat" => [&mov(0, 17)[..], &int[..], &halt[..]].concat(),
+            _ => vec![0xFF,0x00,0x00,0x00, 0x00,0x00,0x00,0x00],
+        }
+    }
+
+    fn handle_file_syscall(&self, cpu: &mut crate::hardware::VirtualCPU, r0: u64, r1: u64, r2: u64) {
+        let pid = cpu.pid();
+        let path = self.read_string_virt(pid, 0x100);
+        use crate::messaging::{FileRequest, OpenFlags, ResponseData};
+        match r0 {
+            0 => cpu.halt(),
+            10 => {
+                let flags = if r1 == 0 { OpenFlags::read_only() } else { OpenFlags::create() };
+                if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Open { path, flags })) {
+                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                        if let Some(ResponseData::Fd(fd)) = resp.data() {
+                            cpu.write_register(crate::hardware::Register::R1, *fd as u64);
+                        }
+                    }
+                }
+            }
+            11 => { self.bus.send(KernelMsg::File(FileRequest::Close { fd: r1 as u32 })).ok(); }
+            12 => {
+                if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Read { fd: r1 as u32, offset: 0, buf: 0, size: r2 as usize })) {
+                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                        if let Some(ResponseData::Bytes(data)) = resp.data() {
+                            if !data.is_empty() { println!("{}", String::from_utf8_lossy(data).trim_end()); }
+                        }
+                    }
+                }
+            }
+            13 => {
+                let data = self.read_bytes_virt(pid, 0x200, r2 as usize);
+                self.bus.send(KernelMsg::File(FileRequest::WriteData { fd: r1 as u32, data })).ok();
+            }
+            14 => { self.bus.send(KernelMsg::File(FileRequest::CreateDirectory { path })).ok(); }
+            16 => { self.bus.send(KernelMsg::File(FileRequest::Unlink { path })).ok(); }
+            17 => { self.bus.send(KernelMsg::File(FileRequest::Stat { path })).ok(); }
+            18 => {
+                if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::ListDir { path })) {
+                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                        if let Some(ResponseData::StringList(entries)) = resp.data() {
+                            for e in entries { println!("{}", e); }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn read_string_virt(&self, pid: u64, vaddr: u64) -> String {
+        let mut buf = vec![0u8; 256];
+        for (i, b) in buf.iter_mut().enumerate() { *b = self._mmu.read_u8(pid, vaddr + i as u64).unwrap_or(0); }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..end]).to_string()
+    }
+
+    fn read_bytes_virt(&self, pid: u64, vaddr: u64, len: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        for (i, b) in buf.iter_mut().enumerate() { *b = self._mmu.read_u8(pid, vaddr + i as u64).unwrap_or(0); }
+        buf
+    }
+
+    fn write_slice_virt(&self, pid: u64, vaddr: u64, data: &[u8]) {
+        for (i, &b) in data.iter().enumerate() { self._mmu.write_u8(pid, vaddr + i as u64, b).ok(); }
     }
 }
 

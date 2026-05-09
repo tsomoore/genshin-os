@@ -9,8 +9,9 @@ pub mod shell;
 // Re-export shell for convenience
 pub use shell::{Shell, ShellConfig};
 
-use crate::messaging::{MessageBus, KernelMsg};
+use crate::messaging::{MessageBus, KernelMsg, Response, BusError};
 use std::sync::Arc;
+use crossbeam_channel::Receiver;
 
 /// User interface context
 pub struct UIContext {
@@ -23,8 +24,16 @@ impl UIContext {
         Self { bus }
     }
 
-    /// Send a message to the kernel
+    /// Send a fire-and-forget message to the kernel
     pub fn send(&self, msg: KernelMsg) {
-        self.bus.send(msg);
+        let _ = self.bus.send(msg);
+    }
+
+    /// Send a request and receive a response
+    ///
+    /// Returns a Receiver that will receive the Response from the handling service.
+    /// Call `rx.recv()` to block until the response arrives.
+    pub fn send_request(&self, msg: KernelMsg) -> Result<Receiver<Response>, BusError> {
+        self.bus.send_request(msg)
     }
 }

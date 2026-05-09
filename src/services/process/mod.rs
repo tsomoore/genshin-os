@@ -11,6 +11,7 @@ pub mod ipc;
 pub mod sync;
 pub mod scheduler;
 pub mod service;
+pub mod assembler;
 
 // Re-export key types
 pub use pcb::{PCB, TCB, ProcessState, ThreadState};

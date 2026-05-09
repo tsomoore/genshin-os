@@ -187,24 +187,19 @@ pub struct VirtualFileSystem {
 impl VirtualFileSystem {
     /// Create a new VFS
     pub fn new() -> Self {
-        // Create root directory
         let root = Arc::new(Mutex::new(VFSNode::new(
-            0,
-            "/".to_string(),
-            NodeType::Directory,
-            None,
-            0, // kernel owns root
-        )));
-
+            0, "/".to_string(), NodeType::Directory, None, 0)));
         let mut nodes = HashMap::new();
         nodes.insert(0, root);
 
-        Self {
-            nodes,
-            next_inode: 1,
-            root_inode: 0,
-            mounts: HashMap::new(),
+        let mut vfs = Self { nodes, next_inode: 1, root_inode: 0, mounts: HashMap::new() };
+
+        // Create standard directories
+        for name in &["bin", "home", "tmp", "etc", "var", "examples"] {
+            let _ = vfs.create_directory(0, name.to_string(), 0);
         }
+
+        vfs
     }
 
     /// Create a new file

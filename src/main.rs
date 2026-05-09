@@ -1,33 +1,41 @@
-// Chao-OS Main Entry Point
-//
-// This is the main entry point for the Chao-OS microkernel simulation.
-// It initializes the system components and starts the interactive shell.
+// Genshin-OS Main Entry Point
 
 use genshin_os::{Shell, LockedBus};
 use genshin_os::services::process::ProcessService;
+use genshin_os::services::file::FileService;
+use genshin_os::hardware::{PhysicalMemory, MMU};
 use std::sync::Arc;
 use std::thread;
 
 fn main() {
-    println!("Initializing Chao-OS microkernel simulation...");
+    println!("Initializing Genshin-OS microkernel simulation...");
 
-    // Create the message bus - central communication hub
+    let hw_memory = PhysicalMemory::new(4 * 1024 * 1024);
+    let mmu = Arc::new(MMU::new(hw_memory.clone(), 4096));
+    println!("\u{2713} Hardware (4MB RAM, 4KB pages)");
+
     let bus = Arc::new(LockedBus::new());
-    println!("✓ Message bus initialized");
+    println!("\u{2713} Message bus");
 
-    // Create and start the process service in a background thread
     let process_bus = bus.clone();
-    let process_service = thread::spawn(move || {
-        let service = ProcessService::new(process_bus);
+    let proc_mem = hw_memory.clone();
+    let proc_mmu = mmu.clone();
+    let _process_handle = thread::spawn(move || {
+        let service = ProcessService::new(process_bus, proc_mem, proc_mmu);
         service.run();
     });
-    println!("✓ Process service started");
+    println!("\u{2713} Process service (with VirtualCPU)");
 
-    // Initialize and start the shell
+    let file_bus = bus.clone();
+    let _file_handle = thread::spawn(move || {
+        let service = FileService::new(file_bus, 256, 1024 * 1024);
+        service.run();
+    });
+    println!("\u{2713} File service");
+
     let mut shell = Shell::new(bus);
-    println!("✓ Shell initialized");
+    println!("\u{2713} Shell");
     println!();
 
-    // Start the interactive shell
     shell.run_interactive();
 }

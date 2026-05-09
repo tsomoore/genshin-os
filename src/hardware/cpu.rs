@@ -347,12 +347,12 @@ impl VirtualCPU {
 
     /// Fetch instruction from memory at PC
     fn fetch_instruction(&mut self) -> Result<Instruction, CPUError> {
-        // For this mock ISA, instructions are encoded as simple byte sequences
-        // Format: [opcode:1][dst:1][src_type:1][src_value/imm:8]
+        // Encoding: [opcode:1][dst:1][src_type:1][pad:1][value:4] = 8 bytes
 
         let opcode = self.fetch_byte()?;
         let dst_reg = self.fetch_byte()?;
         let src_type = self.fetch_byte()?;
+        let _pad = self.fetch_byte()?;
         let src_value = self.fetch_qword()?;
 
         // Decode opcode

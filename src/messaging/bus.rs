@@ -202,29 +202,26 @@ impl MessageBus for LockedBus {
     fn send_request(&self, msg: KernelMsg) -> Result<Receiver<Response>, BusError> {
         let state = self.state.lock().unwrap();
 
+        if state.subscribers.is_empty() {
+            return Err(BusError::Disconnected);
+        }
+
         // Create envelope with response channel
         let (envelope, rx) = Envelope::with_response(msg);
 
-        // Extract the parts we need
-        let message = envelope.message;
-        let request_id = envelope.request_id;
-        let response_channel = envelope.response_channel;
-
-        // Send to the first available subscriber
-        // For request-response, only one handler should process it
+        // Broadcast to all subscribers so the correct service can handle it
+        // Each service checks the message type and ignores what it doesn't handle
         for subscriber in &state.subscribers {
             let env = Envelope {
-                message: message.clone(),
-                request_id,
-                response_channel: response_channel.clone(),
+                message: envelope.message.clone(),
+                request_id: envelope.request_id,
+                response_channel: envelope.response_channel.clone(),
             };
-
-            if subscriber.try_send(env).is_ok() {
-                return Ok(rx);
-            }
+            // Unbounded channel — try_send only fails if disconnected
+            let _ = subscriber.try_send(env);
         }
 
-        Err(BusError::Disconnected)
+        Ok(rx)
     }
 
     fn subscribe(&self) -> Receiver<Envelope> {

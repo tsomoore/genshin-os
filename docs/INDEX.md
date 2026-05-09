@@ -25,6 +25,23 @@
 
 ---
 
+### 🖥 Shell 命令参考 ⭐ 新增
+**路径**: `docs/SHELL_COMMANDS.md`
+
+**说明**: 完整 Shell 命令手册，包括所有内置命令和进程管理命令的详细说明。
+
+**包含内容**:
+- 📋 内置命令（echo/export/cd/ls 等）
+- 🧬 进程管理命令（run/ps/info/fork/kill）
+- 📮 IPC 通信命令（send）
+- 🔒 同步原语命令（sem create/wait/signal、lock create/acquire/release）
+- 📊 命令到 KernelMsg 的完整映射图
+- 🧪 演示脚本使用说明
+- 📝 添加新命令的方法
+
+**适合**: 所有用户、开发者
+---
+
 ### 1. 文档中心 (README.md)
 **路径**: `docs/README.md`
 

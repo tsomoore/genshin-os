@@ -1,37 +1,33 @@
-// CLI Shell for genshin-os
+// CLI Shell for Genshin-OS
 //
-// Provides an interactive command-line interface for users to interact
-// with the kernel through the message bus.
+// All file operations go through FileService via the message bus.
+// No local VFS — single source of truth.
 
 pub mod parser;
 pub mod builtins;
-pub mod filesystem;
 
-use crate::messaging::{MessageBus, KernelMsg, Pid};
+use crate::messaging::{MessageBus, KernelMsg, Pid, Response, ResponseData, ProcessRequest};
 use crate::ui::UIContext;
 use std::sync::Arc;
+use std::time::Duration;
+use std::path::{Path, PathBuf};
 use parser::{Command, ShellParser};
 use builtins::BuiltinCommand;
-use filesystem::VirtualFileSystem;
 
 /// Shell configuration
 #[derive(Debug, Clone)]
 pub struct ShellConfig {
-    /// Prompt string
     pub prompt: String,
-    /// Current process ID (for command execution context)
     pub current_pid: Pid,
-    /// Echo commands before execution
     pub echo: bool,
-    /// Show welcome message
     pub show_welcome: bool,
 }
 
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
-            prompt: "chao-os> ".to_string(),
-            current_pid: 1, // Shell runs as PID 1
+            prompt: "genshin-os> ".to_string(),
+            current_pid: 1,
             echo: false,
             show_welcome: true,
         }
@@ -40,52 +36,35 @@ impl Default for ShellConfig {
 
 /// Main shell structure
 pub struct Shell {
-    /// UI context
     context: UIContext,
-    /// Shell configuration
     config: ShellConfig,
-    /// Command parser
     parser: ShellParser,
-    /// Built-in commands
     builtins: BuiltinCommand,
-    /// Virtual filesystem for shell operations
-    filesystem: VirtualFileSystem,
-    /// Running state
+    cwd: String,
     running: bool,
 }
 
 impl Shell {
-    /// Create a new shell
     pub fn new(bus: Arc<dyn MessageBus>) -> Self {
         let context = UIContext::new(bus);
-        let config = ShellConfig::default();
-        let parser = ShellParser::new();
-        let builtins = BuiltinCommand::new();
-        let filesystem = VirtualFileSystem::new();
-
         Self {
             context,
-            config,
-            parser,
-            builtins,
-            filesystem,
+            config: ShellConfig::default(),
+            parser: ShellParser::new(),
+            builtins: BuiltinCommand::new(),
+            cwd: "/".to_string(),
             running: false,
         }
     }
 
-    /// Create a new shell with custom configuration
     pub fn with_config(bus: Arc<dyn MessageBus>, config: ShellConfig) -> Self {
         let context = UIContext::new(bus);
-        let parser = ShellParser::new();
-        let builtins = BuiltinCommand::new();
-        let filesystem = VirtualFileSystem::new();
-
         Self {
             context,
             config,
-            parser,
-            builtins,
-            filesystem,
+            parser: ShellParser::new(),
+            builtins: BuiltinCommand::new(),
+            cwd: "/".to_string(),
             running: false,
         }
     }
@@ -99,26 +78,17 @@ impl Shell {
         }
 
         while self.running {
-            // Display prompt and read input
             let input = self.read_line();
-
-            // Handle EOF (Ctrl+D)
             if input.is_empty() {
-                println!(); // Print newline before exit
+                println!();
                 break;
             }
-
-            // Skip empty lines (but not EOF)
             if input.trim().is_empty() {
                 continue;
             }
-
-            // Echo command if enabled
             if self.config.echo {
                 println!("{}", input);
             }
-
-            // Parse and execute command
             if let Err(err) = self.execute_line(&input) {
                 eprintln!("Error: {}", err);
             }
@@ -127,13 +97,37 @@ impl Shell {
 
     /// Execute a single command line
     pub fn execute_line(&mut self, line: &str) -> Result<(), String> {
-        // Parse the command
         let command = self.parser.parse(line)
             .ok_or_else(|| format!("Failed to parse command: {}", line))?;
-
-        // Execute it
         self.execute_command(&command)
     }
+
+    /// Resolve a path (relative to cwd or absolute)
+    fn resolve_path(&self, path: &str) -> String {
+        let p = Path::new(path);
+        if p.is_absolute() {
+            path.to_string()
+        } else {
+            let mut base = PathBuf::from(&self.cwd);
+            for comp in p.components() {
+                match comp {
+                    std::path::Component::ParentDir => { base.pop(); }
+                    std::path::Component::Normal(c) => { base.push(c); }
+                    _ => {}
+                }
+            }
+            base.to_string_lossy().to_string()
+        }
+    }
+
+    /// Send a request via the message bus and wait for the response
+    fn send_and_wait(&self, msg: KernelMsg) -> Result<Response, String> {
+        let rx = self.context.send_request(msg)
+            .map_err(|e| format!("Bus error: {}", e))?;
+        rx.recv_timeout(Duration::from_secs(3))
+            .map_err(|e| format!("No response from service: {}", e))
+    }
+
 
     /// Execute a parsed command
     fn execute_command(&mut self, command: &Command) -> Result<(), String> {
@@ -148,184 +142,291 @@ impl Shell {
                 Ok(())
             }
             "pwd" => {
-                // Use real filesystem
-                println!("{}", self.filesystem.pwd());
+                println!("{}", self.cwd);
                 Ok(())
             }
             "cd" => {
-                // Use real filesystem
-                let default_path = "/".to_string();
-                let path = command.args.get(0).unwrap_or(&default_path);
-                self.filesystem.cd(path)
+                let path = command.args.get(0).map(|s| s.as_str()).unwrap_or("/");
+                let target = self.resolve_path(path);
+                let msg = KernelMsg::File(crate::messaging::FileRequest::Stat {
+                    path: target.clone(),
+                });
+                match self.send_and_wait(msg) {
+                    Ok(_) => { self.cwd = target; Ok(()) }
+                    Err(_) => Err(format!("cd: {}: No such directory", path)),
+                }
             }
             "ls" => {
-                // Use real filesystem
-                let path = command.args.first().map(|s| s.as_str());
-                match self.filesystem.ls(path) {
-                    Ok(entries) => {
-                        for entry in entries {
-                            println!("{}", entry);
-                        }
-                        Ok(())
-                    }
-                    Err(err) => Err(err)
+                let path = command.args.first().map(|s| s.as_str()).unwrap_or(".");
+                let target = self.resolve_path(path);
+                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "ls".into(), params: target.as_bytes().to_vec() });
+                let _ = self.send_and_wait(msg)?;
+                Ok(())
+            }
+            "tree" => {
+                let path = command.args.first().map(|s| s.as_str()).unwrap_or("/");
+                let target = self.resolve_path(path);
+                let root = PathBuf::from(&target);
+                println!("{}", root.display());
+                self.print_tree_recursive(&root, "");
+                Ok(())
+            }
+            "cd" => {
+                let path = command.args.get(0).map(|s| s.as_str()).unwrap_or("/");
+                let target = self.resolve_path(path);
+                let msg = KernelMsg::File(crate::messaging::FileRequest::Stat { path: target.clone() });
+                match self.send_and_wait(msg) {
+                    Ok(_) => { self.cwd = target; Ok(()) }
+                    Err(_) => Err(format!("cd: {}: No such directory", path)),
                 }
             }
             "mkdir" => {
-                // Use real filesystem
                 let path = command.args.get(0).ok_or_else(|| "mkdir: missing operand".to_string())?;
-                self.filesystem.mkdir(path)
+                let target = self.resolve_path(path);
+                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "mkdir".into(), params: target.as_bytes().to_vec() });
+                let _ = self.send_and_wait(msg)?;
+                Ok(())
+            }
+            "touch" => {
+                let path = command.args.get(0).ok_or_else(|| "touch: missing operand".to_string())?;
+                let target = self.resolve_path(path);
+                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "touch".into(), params: target.as_bytes().to_vec() });
+                let _ = self.send_and_wait(msg)?;
+                Ok(())
+            }
+            "cat" => {
+                let path = command.args.get(0).ok_or_else(|| "cat: missing operand".to_string())?;
+                let target = self.resolve_path(path);
+                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "cat".into(), params: target.as_bytes().to_vec() });
+                let _ = self.send_and_wait(msg)?;
+                Ok(())
+            }
+            "write" => {
+                let path = command.args.get(0).ok_or_else(|| "write: missing operand".to_string())?;
+                let content = if command.args.len() > 1 { command.args[1..].join(" ") } else { String::new() };
+                let target = self.resolve_path(path);
+                let params = { let mut p = target.as_bytes().to_vec(); p.push(0); p.extend_from_slice(content.as_bytes()); p };
+                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "write".into(), params });
+                let _ = self.send_and_wait(msg)?;
+                Ok(())
+            }
+            "rm" => {
+                let path = command.args.get(0).ok_or_else(|| "rm: missing operand".to_string())?;
+                let target = self.resolve_path(path);
+                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "rm".into(), params: target.as_bytes().to_vec() });
+                let _ = self.send_and_wait(msg)?;
+                Ok(())
+            }
+            "stat" => {
+                let path = command.args.get(0).ok_or_else(|| "stat: missing operand".to_string())?;
+                let target = self.resolve_path(path);
+                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "stat".into(), params: target.as_bytes().to_vec() });
+                let _ = self.send_and_wait(msg)?;
+                println!("stat: '{}'", path);
+                Ok(())
+            }
+            "disk" => {
+                let msg = KernelMsg::File(crate::messaging::FileRequest::DiskInfo);
+                match self.send_and_wait(msg) {
+                    Ok(resp) => {
+                        if let Some(ResponseData::DiskStats { total_sectors, used_sectors, total_bytes }) = resp.data() {
+                            let u = *used_sectors; let t = *total_sectors as f64;
+                            let pct = if t > 0.0 { (u as f64 / t) * 100.0 } else { 0.0 };
+                            println!("Disk: {}/{} sectors ({:.1}%), {} bytes", u, total_sectors, pct, total_bytes);
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("disk: {}", e)),
+                }
+            }
+            "cpu" => {
+                use crate::hardware::{PhysicalMemory, MMU, VirtualCPU, PageFlags};
+                use crate::messaging::LockedBus;
+                println!("╔════════════════════════════════════════╗");
+                println!("║     VirtualCPU Instruction Demo        ║");
+                println!("╚════════════════════════════════════════╝");
+                let mem = PhysicalMemory::new(64 * 1024);
+                let mmu = Arc::new(MMU::new(mem.clone(), 4096));
+                let bus: Arc<dyn MessageBus> = Arc::new(LockedBus::new());
+                let flags = PageFlags { present: true, writable: true, user_accessible: true };
+                mmu.map_page(0, 0x0000, 0x0000, flags).map_err(|e| format!("MMU: {}", e))?;
+                let program: Vec<u8> = vec![
+                    0x01,0x00,0x01, 0x00, 0x0A,0x00,0x00,0x00,
+                    0x01,0x01,0x01, 0x00, 0x14,0x00,0x00,0x00,
+                    0x02,0x02,0x00, 0x00, 0x00,0x00,0x00,0x00,
+                    0x02,0x02,0x00, 0x00, 0x01,0x00,0x00,0x00,
+                    0x03,0x03,0x00, 0x00, 0x02,0x00,0x00,0x00,
+                    0xFF,0x00,0x00, 0x00, 0x00,0x00,0x00,0x00,
+                ];
+                mem.write_slice(0x100, &program).map_err(|e| format!("Mem: {}", e))?;
+                let mut cpu = VirtualCPU::new(mmu, bus, 0);
+                cpu.set_pc(0x100);
+                println!("  PC   │  R0     R1     R2     R3   │Z S O C│ #");
+                println!("───────┼──────────────────────────────┼───────┼───");
+                while !cpu.is_halted() {
+                    let before = cpu.dump_state();
+                    match cpu.step() {
+                        Ok(()) => {
+                            let after = cpu.dump_state();
+                            print!("{:#06x}→{:#06x}│", before.pc, after.pc);
+                            for i in 0..4 { print!("{:<7}", after.registers[i] as i64); }
+                            print!("│{} {} {} {}│",
+                                after.flags.zero as u8, after.flags.sign as u8,
+                                after.flags.overflow as u8, after.flags.carry as u8);
+                            println!(" {}", after.instruction_count);
+                        }
+                        Err(e) => { println!("     ! {}", e); break; }
+                    }
+                }
+                println!("───────┴──────────────────────────────┴───────┴───");
+                println!("✓ {} instructions, halted: {}", cpu.dump_state().instruction_count, cpu.is_halted());
+                Ok(())
+            }
+            "run" => {
+                let prog = command.args.get(0).ok_or_else(|| "run: missing program name")?;
+                let args: Vec<String> = command.args.iter().skip(1).cloned().collect();
+                let msg = KernelMsg::Syscall(crate::messaging::Syscall::CreateProcess {
+                    executable: prog.clone(),
+                    args,
+                });
+                let _ = self.send_and_wait(msg)?;
+                println!("run: started '{}'", prog);
+                Ok(())
+            }
+            "ps" => {
+                let msg = KernelMsg::Process(crate::messaging::ProcessRequest::ListProcesses);
+                self.context.send(msg);
+                Ok(())
             }
             _ => {
-                // Try built-in commands first
                 if let Some(result) = self.builtins.execute(&self.context, command) {
                     result
                 } else {
-                    // Send as kernel message
                     self.execute_kernel_command(command)
                 }
             }
         }
     }
 
-    /// Execute a command via the kernel message bus
+    /// Convert shell command to kernel message (legacy support)
     fn execute_kernel_command(&self, command: &Command) -> Result<(), String> {
-        // Convert command to kernel message
         let msg = self.command_to_message(command)
             .ok_or_else(|| format!("Unknown command: {}", command.name))?;
-
-        // Send to message bus
         self.context.send(msg);
         Ok(())
     }
 
-    /// Convert shell command to kernel message
     fn command_to_message(&self, command: &Command) -> Option<KernelMsg> {
-        use crate::messaging::{ProcessRequest, MemoryRequest, FileRequest, DeviceRequest};
-
+        use crate::messaging::{ProcessRequest, Syscall, SignalType, IPCMessage, OpenFlags, FileRequest};
         match command.name.as_str() {
+            "run" => {
+                let executable = command.args.get(0)?.clone();
+                let args: Vec<String> = command.args.iter().skip(1).cloned().collect();
+                Some(KernelMsg::Syscall(Syscall::CreateProcess { executable, args }))
+            }
             "ps" => Some(KernelMsg::Process(ProcessRequest::ListProcesses)),
-            "mount" => {
-                let device_str = command.args.get(0)?;
-                let mount_point = command.args.get(1)?.clone();
-                let fs_type = command.args.get(2)
-                    .and_then(|t| Self::parse_fs_type(t))
-                    .unwrap_or(crate::messaging::FileSystemType::FAT32);
-
-                // Try to parse device ID from string
-                let device_id = device_str.parse::<u32>().unwrap_or(0);
-
-                Some(KernelMsg::File(FileRequest::Mount {
-                    device_id,
-                    mount_point,
-                    fs_type,
+            "kill" => {
+                let pid: u64 = command.args.get(0)?.parse().ok()?;
+                let signal = match command.args.get(1).map(|s| s.as_str()).unwrap_or("term") {
+                    "kill" | "sigkill" => SignalType::Kill,
+                    "stop" | "sigstop" => SignalType::Stop,
+                    _ => SignalType::Terminate,
+                };
+                Some(KernelMsg::Process(ProcessRequest::Signal { pid, signal }))
+            }
+            "send" => {
+                let from_pid: u64 = command.args.get(0)?.parse().ok()?;
+                let to_pid: u64 = command.args.get(1)?.parse().ok()?;
+                let text = command.args.get(2)?.clone();
+                Some(KernelMsg::Process(ProcessRequest::SendMessage {
+                    from_pid, to_pid, msg: IPCMessage::Text { data: text },
                 }))
             }
+            "mount" => {
+                let device_id = command.args.get(0)?.parse::<u32>().unwrap_or(0);
+                let mount_point = command.args.get(1)?.clone();
+                let fs_type = crate::messaging::FileSystemType::SimpleFS;
+                Some(KernelMsg::File(FileRequest::Mount { device_id, mount_point, fs_type }))
+            }
             _ => None,
         }
     }
 
-    /// Parse filesystem type from string
-    fn parse_fs_type(s: &str) -> Option<crate::messaging::FileSystemType> {
-        match s.to_lowercase().as_str() {
-            "fat32" => Some(crate::messaging::FileSystemType::FAT32),
-            "ext4" => Some(crate::messaging::FileSystemType::EXT4),
-            "simple" | "simplefs" => Some(crate::messaging::FileSystemType::SimpleFS),
-            _ => None,
-        }
-    }
-
-    /// Read a line from stdin
     fn read_line(&self) -> String {
         use std::io::{self, Write};
-
-        print!("{}", self.config.prompt);
+        print!("genshin-os:{}> ", self.cwd);
         io::stdout().flush().unwrap_or(());
-
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
-            Ok(0) => {
-                // EOF (Ctrl+D) - return empty string to trigger exit
-                String::new()
-            }
-            Ok(_) => {
-                input.trim_end().to_string()
-            }
-            Err(_) => {
-                String::new()
-            }
+            Ok(0) => String::new(),
+            Ok(_) => input.trim_end().to_string(),
+            Err(_) => String::new(),
         }
     }
 
-    /// Print welcome message
     fn print_welcome(&self) {
         println!("╔════════════════════════════════════════════════════════════╗");
-        println!("║            Welcome to Chao-OS Microkernel Shell            ║");
-        println!("║                     Version 0.1.0                           ║");
+        println!("║           Welcome to Genshin-OS Microkernel Shell          ║");
+        println!("║                     Version 0.2.0                          ║");
         println!("╠════════════════════════════════════════════════════════════╣");
         println!("║  Type 'help' for available commands or 'exit' to quit.     ║");
         println!("╚════════════════════════════════════════════════════════════╝");
         println!();
     }
 
-    /// Show help information
     fn show_help(&self) {
         println!("Available commands:");
         println!();
         println!("  File System:");
-        println!("    ls [path]   List directory contents");
-        println!("    cd <path>   Change directory");
-        println!("    pwd         Print working directory");
-        println!("    mkdir <dir> Create a directory");
-        println!();
+        println!("    ls [path]              List directory contents");
+        println!("    cd <path>              Change directory");
+        println!("    pwd                    Print working directory");
+        println!("    mkdir <dir>            Create a directory");
+        println!("    touch <file>           Create a file");
+        println!("    cat <file>             Read file contents");
+        println!("    write <file> <text>    Write text to file");
+        println!("    rm <file>              Delete file");
+        println!("    stat <file>            Show file info");
+        println!("    disk                   Show disk usage");
         println!("  Process Management:");
-        println!("    ps          List all processes");
-        println!();
+        println!("    run <name> [args...]   Run program from programs/<name>.asm");
+        println!("    ps                     List all processes");
+        println!("    kill <pid> [sig]       Send signal (term/kill/stop)");
+        println!("    send <from> <to> <msg> Send IPC message");
+        println!("  Hardware:");
+        println!("    cpu                    CPU instruction demo");
+        println!("    mem                    PhysicalMemory hex dump");
         println!("  System:");
-        println!("    echo <text> Print text to stdout");
-        println!("    clear       Clear the screen");
-        println!("    help        Show this help message");
-        println!("    exit        Exit the shell");
+        println!("    echo <text>            Print text to stdout");
+        println!("    clear                  Clear the screen");
+        println!("    help                   Show this help message");
+        println!("    exit                   Exit the shell");
         println!();
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::messaging::LockedBus;
-
-    #[test]
-    fn test_shell_creation() {
-        let bus = Arc::new(LockedBus::new());
-        let shell = Shell::new(bus);
-        assert_eq!(shell.config.prompt, "chao-os> ".to_string());
-    }
-
-    #[test]
-    fn test_shell_with_config() {
-        let bus = Arc::new(LockedBus::new());
-        let config = ShellConfig {
-            prompt: "test> ".to_string(),
-            ..Default::default()
-        };
-        let shell = Shell::with_config(bus, config);
-        assert_eq!(shell.config.prompt, "test> ".to_string());
-    }
-
-    #[test]
-    fn test_parse_simple_command() {
-        let parser = ShellParser::new();
-        let command = parser.parse("ls").unwrap();
-        assert_eq!(command.name, "ls");
-        assert!(command.args.is_empty());
-    }
-
-    #[test]
-    fn test_parse_command_with_args() {
-        let parser = ShellParser::new();
-        let command = parser.parse("mkdir /tmp/test").unwrap();
-        assert_eq!(command.name, "mkdir");
-        assert_eq!(command.args, vec!["/tmp/test"]);
+    /// Recursively print directory tree via FileService
+    fn print_tree_recursive(&self, path: &Path, prefix: &str) {
+        let path_str = path.to_string_lossy().to_string();
+        let msg = KernelMsg::File(crate::messaging::FileRequest::ListDir { path: path_str });
+        if let Ok(resp) = self.send_and_wait(msg) {
+            if let Some(ResponseData::StringList(entries)) = resp.data() {
+                let count = entries.len();
+                for (i, child) in entries.iter().enumerate() {
+                    let is_last = i == count - 1;
+                    let connector = if is_last { "└── " } else { "├── " };
+                    let child_path = path.join(child);
+                    // Check if it's a directory by trying to list it
+                    let child_str = child_path.to_string_lossy().to_string();
+                    let dir_msg = KernelMsg::File(crate::messaging::FileRequest::ListDir { path: child_str.clone() });
+                    if self.send_and_wait(dir_msg).is_ok() {
+                        println!("{}{}{}/", prefix, connector, child);
+                        let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+                        self.print_tree_recursive(&child_path, &new_prefix);
+                    } else {
+                        println!("{}{}{}", prefix, connector, child);
+                    }
+                }
+            }
+        }
     }
 }

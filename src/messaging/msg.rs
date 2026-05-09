@@ -269,6 +269,9 @@ pub enum ProcessRequest {
     /// Query process info (for debugging/monitoring)
     GetProcessInfo { pid: Pid },
 
+    /// Spawn a program on the CPU
+    Spawn { program: String, params: Vec<u8> },
+
     /// List all processes
     ListProcesses,
 }
@@ -343,6 +346,8 @@ pub enum FileRequest {
         size: usize,
     },
 
+    /// Write data directly (simulation-friendly)
+    WriteData { fd: u32, data: Vec<u8> },
     /// Delete file
     Unlink { path: String },
 
@@ -364,6 +369,12 @@ pub enum FileRequest {
 
     /// Close directory
     CloseDirectory { dir_fd: u32 },
+
+    /// List directory entries
+    ListDir { path: String },
+
+    /// Query disk info
+    DiskInfo,
 
     // ========== File System Management ==========
     /// Mount file system

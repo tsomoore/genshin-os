@@ -60,7 +60,8 @@ impl FileService {
         let vfs = Arc::new(Mutex::new(VirtualFileSystem::new()));
         let fd_manager = Arc::new(Mutex::new(FileDescriptorManager::new(max_fds_per_process)));
         let open_files = Arc::new(Mutex::new(HashMap::new()));
-        let disk = Arc::new(Mutex::new(VirtualDisk::new(disk_size as u32)));
+        let sector_count = (disk_size / 512) as u32;
+        let disk = Arc::new(Mutex::new(VirtualDisk::new(sector_count)));
 
         Self {
             bus,
@@ -132,7 +133,7 @@ impl FileService {
                 eprintln!("FileService: Hardware failure in {}", component);
             }
             _ => {
-                println!("FileService: Received interrupt {:?}", interrupt);
+                // ignore
             }
         }
         Ok(())
@@ -153,13 +154,17 @@ impl FileService {
                 self.handle_close(pid, fd)?;
             }
 
-            FileRequest::Read { fd, offset, buf, size } => {
+            FileRequest::Read { fd, offset: _, buf: _, size } => {
                 self.handle_read(pid, fd, size)?;
             }
 
-            FileRequest::Write { fd, offset, buf, size } => {
+            FileRequest::Write { fd, offset: _, buf: _, size } => {
                 // For now, we'll create a dummy data vector
                 let data = vec![0u8; size];
+                self.handle_write(pid, fd, data)?;
+            }
+
+            FileRequest::WriteData { fd, data } => {
                 self.handle_write(pid, fd, data)?;
             }
 
@@ -228,6 +233,10 @@ impl FileService {
                 self.handle_write_with_response(pid, fd, data, envelope)?;
             }
 
+            FileRequest::WriteData { fd, data } => {
+                self.handle_write_with_response(pid, fd, data, envelope)?;
+            }
+
             FileRequest::Unlink { path } => {
                 self.handle_delete(pid, path)?;
                 let _ = envelope.respond_success(ResponseData::Void);
@@ -255,9 +264,29 @@ impl FileService {
                 let _ = envelope.respond_success(ResponseData::Void);
             }
 
-            FileRequest::Unlink { path } => {
-                self.handle_delete(pid, path)?;
-                let _ = envelope.respond_success(ResponseData::Void);
+            FileRequest::DiskInfo => {
+                let disk = self.disk.lock().map_err(|_| {
+                    GenshinError::Service(ServiceError::Other { code: 40, msg: "disk lock".into() })
+                })?;
+                let state = disk.dump_state();
+                let _ = envelope.respond_success(ResponseData::DiskStats {
+                    total_sectors: state.total_sectors,
+                    used_sectors: disk.used_sectors_count(),
+                    total_bytes: state.total_bytes,
+                });
+            }
+
+            FileRequest::ListDir { path } => {
+                match self.handle_listdir_with_response(pid, &path) {
+                    Ok(entries) => {
+                        let _ = envelope.respond_success(ResponseData::StringList(entries));
+                    }
+                    Err(e) => {
+                        let _ = envelope.respond_error(MessagingServiceError::Other {
+                            code: 50, msg: e.to_string(),
+                        });
+                    }
+                }
             }
 
             _ => {
@@ -272,10 +301,39 @@ impl FileService {
     // ========== File Operations Handlers ==========
 
     fn handle_open(&self, pid: Pid, path: String, flags: OpenFlags) -> GenshinResult<()> {
-        let vfs = Self::lock_mutex(&self.vfs)?;
+        let mut vfs = Self::lock_mutex(&self.vfs)?;
 
-        // Look up file by path
-        let node = vfs.lookup_path(&path)?;
+        // Look up file by path, create if flags.create is set
+        let node = match vfs.lookup_path(&path) {
+            Ok(node) => node,
+            Err(_) if flags.create => {
+                // Extract parent directory and filename
+                let (parent_path, name) = match path.rfind('/') {
+                    Some(pos) if pos == 0 => ("/".to_string(), path[1..].to_string()),
+                    Some(pos) => (path[..pos].to_string(), path[pos+1..].to_string()),
+                    None => return Err(GenshinError::Service(ServiceError::InvalidArguments {
+                        param: "path".to_string(),
+                        reason: "Cannot create root as file".to_string(),
+                    })),
+                };
+                // Look up parent directory inode
+                let parent = vfs.lookup_path(&parent_path).map_err(|_| {
+                    GenshinError::Service(ServiceError::NotFound {
+                        resource_type: "Parent directory".to_string(),
+                        id: parent_path.clone(),
+                    })
+                })?;
+                let parent_inode = parent.lock().map_err(|e| {
+                    GenshinError::Service(ServiceError::Other {
+                        code: 20,
+                        msg: format!("Mutex poisoned: {}", e),
+                    })
+                })?.inode;
+                vfs.create_file(parent_inode, name.clone(), pid)?;
+                vfs.lookup_path(&path)?
+            }
+            Err(e) => return Err(e),
+        };
 
         let node = Self::lock_mutex(&node)?;
         if !node.is_file() {
@@ -284,12 +342,24 @@ impl FileService {
                 reason: "Not a file".to_string(),
             }));
         }
-
         let inode = node.inode;
         drop(node);
+        drop(vfs);
 
         // Get or create file
         let file = if let Some(file) = Self::lock_mutex(&self.open_files)?.get(&inode) {
+            // Update mode for cached file to match new open flags
+            {
+                let mut f = file.lock().map_err(|e| {
+                    GenshinError::Service(ServiceError::Other {
+                        code: 20,
+                        msg: format!("Mutex poisoned: {}", e),
+                    })
+                })?;
+                f.mode = Self::open_flags_to_mode(flags)?;
+                f.position = 0;
+                f.eof = false;
+            }
             file.clone()
         } else {
             let new_file = Arc::new(Mutex::new(File::new(
@@ -298,7 +368,6 @@ impl FileService {
                 pid,
                 Self::open_flags_to_mode(flags)?,
             )));
-
             Self::lock_mutex(&self.open_files)?.insert(inode, new_file.clone());
             new_file
         };
@@ -314,17 +383,58 @@ impl FileService {
     }
 
     fn handle_open_with_response(&self, pid: Pid, path: String, flags: OpenFlags, envelope: &Envelope) -> GenshinResult<()> {
-        let vfs = Self::lock_mutex(&self.vfs)?;
+        let mut vfs = Self::lock_mutex(&self.vfs)?;
 
-        // Look up file by path
-        let node = vfs.lookup_path(&path);
-
-        let node = match node {
+        let node = match vfs.lookup_path(&path) {
             Ok(n) => n,
+            Err(_) if flags.create => {
+                let (parent_path, name) = match path.rfind('/') {
+                    Some(pos) if pos == 0 => ("/".to_string(), path[1..].to_string()),
+                    Some(pos) => (path[..pos].to_string(), path[pos+1..].to_string()),
+                    None => {
+                        let _ = envelope.respond_error(MessagingServiceError::InvalidArguments {
+                            msg: "Cannot create root as file".to_string(),
+                        });
+                        return Err(GenshinError::Service(ServiceError::InvalidArguments {
+                            param: "path".to_string(),
+                            reason: "Cannot create root as file".to_string(),
+                        }));
+                    }
+                };
+                let parent = match vfs.lookup_path(&parent_path) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        let _ = envelope.respond_error(MessagingServiceError::NotFound {
+                            resource: "Parent directory".to_string(),
+                            id: parent_path.clone(),
+                        });
+                        return Err(GenshinError::Service(ServiceError::NotFound {
+                            resource_type: "Parent directory".to_string(),
+                            id: parent_path.to_string(),
+                        }));
+                    }
+                };
+                let parent_inode = parent.lock().map_err(|e| {
+                    GenshinError::Service(ServiceError::Other { code: 20, msg: format!("Mutex poisoned: {}", e) })
+                })?.inode;
+                vfs.create_file(parent_inode, name.clone(), pid).map_err(|e| {
+                    let _ = envelope.respond_error(MessagingServiceError::Other {
+                        code: 21, msg: e.to_string(),
+                    });
+                    e
+                })?;
+                vfs.lookup_path(&path).map_err(|e| {
+                    let _ = envelope.respond_error(MessagingServiceError::NotFound {
+                        resource: "File".to_string(),
+                        id: path.clone(),
+                    });
+                    e
+                })?
+            }
             Err(e) => {
                 let _ = envelope.respond_error(MessagingServiceError::NotFound {
                     resource: "File".to_string(),
-                    id: path,
+                    id: path.clone(),
                 });
                 return Err(e);
             }
@@ -347,6 +457,18 @@ impl FileService {
 
         // Get or create file
         let file = if let Some(file) = Self::lock_mutex(&self.open_files)?.get(&inode) {
+            // Update mode for cached file to match new open flags
+            {
+                let mut f = file.lock().map_err(|e| {
+                    GenshinError::Service(ServiceError::Other {
+                        code: 20,
+                        msg: format!("Mutex poisoned: {}", e),
+                    })
+                })?;
+                f.mode = Self::open_flags_to_mode(flags)?;
+                f.position = 0;
+                f.eof = false;
+            }
             file.clone()
         } else {
             let new_file = Arc::new(Mutex::new(File::new(
@@ -355,7 +477,6 @@ impl FileService {
                 pid,
                 Self::open_flags_to_mode(flags)?,
             )));
-
             Self::lock_mutex(&self.open_files)?.insert(inode, new_file.clone());
             new_file
         };
@@ -380,6 +501,28 @@ impl FileService {
     }
 
     fn handle_close_with_response(&self, pid: Pid, fd: Fd, envelope: &Envelope) -> GenshinResult<()> {
+        // Sync file data to disk before closing
+        {
+            let fd_manager = Self::lock_mutex(&self.fd_manager)?;
+            if let Some(open_file) = fd_manager.get(pid, fd) {
+                let mut file = open_file.file.lock().map_err(|e| {
+                    GenshinError::Service(ServiceError::Other {
+                        code: 30, msg: format!("Mutex: {}", e)
+                    })
+                })?;
+                if file.is_dirty() {
+                    let disk_guard = self.disk.lock().map_err(|e| {
+                        GenshinError::Service(ServiceError::Other { code: 29, msg: format!("Disk: {}", e) })
+                    })?;
+                    if let Err(e) = file.sync_to_disk(&disk_guard) {
+                        eprintln!("FileService: sync failed for fd {}: {}", fd, e);
+                    }
+                    println!("FileService: Synced fd {} to disk ({} sectors, start={:?})",
+                        fd, file.sector_count, file.start_sector);
+                }
+            }
+        }
+
         let mut fd_manager = Self::lock_mutex(&self.fd_manager)?;
         fd_manager.close(pid, fd)?;
 
@@ -424,8 +567,8 @@ impl FileService {
 
         println!("FileService: Read {} bytes from fd {} for pid {}", data.len(), fd, pid);
 
-        // Send response with bytes processed
-        let _ = envelope.respond_success(ResponseData::BytesProcessed(data.len()));
+        // Send response with actual data
+        let _ = envelope.respond_success(ResponseData::Bytes(data));
         Ok(())
     }
 
@@ -504,7 +647,7 @@ impl FileService {
 
     // ========== File Management Handlers ==========
 
-    fn handle_create(&self, pid: Pid, path: String, permissions: u16) -> GenshinResult<()> {
+    fn handle_create(&self, pid: Pid, path: String, _permissions: u16) -> GenshinResult<()> {
         let mut vfs = Self::lock_mutex(&self.vfs)?;
 
         // Get parent directory and file name
@@ -563,7 +706,7 @@ impl FileService {
 
     // ========== Directory Operations Handlers ==========
 
-    fn handle_mkdir(&self, pid: Pid, path: String, permissions: u16) -> GenshinResult<()> {
+    fn handle_mkdir(&self, pid: Pid, path: String, _permissions: u16) -> GenshinResult<()> {
         let mut vfs = Self::lock_mutex(&self.vfs)?;
 
         // Get parent directory and directory name
@@ -643,6 +786,23 @@ impl FileService {
         Ok(())
     }
 
+    /// List directory and return entries
+    fn handle_listdir_with_response(&self, pid: Pid, path: &str) -> GenshinResult<Vec<String>> {
+        let vfs = Self::lock_mutex(&self.vfs)?;
+        let node = vfs.lookup_path(path)?;
+        let node = Self::lock_mutex(&node)?;
+        if !node.is_directory() {
+            return Err(GenshinError::Service(ServiceError::InvalidArguments {
+                param: "path".to_string(), reason: "Not a directory".to_string(),
+            }));
+        }
+        let mut entries: Vec<String> = node.children.keys().cloned().collect();
+        entries.sort();
+        println!("FileService: Listed {} for pid {}: {} entries", path, pid, entries.len());
+        Ok(entries)
+    }
+
+    // ========== File Descriptor Operations Handlers ==========
     // ========== File Descriptor Operations Handlers ==========
 
     fn handle_dup(&self, pid: Pid, old_fd: Fd) -> GenshinResult<()> {
@@ -778,5 +938,168 @@ mod tests {
         flags.write = true;
         let mode = FileService::open_flags_to_mode(flags).unwrap();
         assert_eq!(mode, OpenMode::ReadWrite);
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::messaging::LockedBus;
+    use crate::messaging::OpenFlags;
+    use std::thread;
+    use std::time::Duration;
+
+    fn wait_ms(ms: u64) {
+        thread::sleep(Duration::from_millis(ms));
+    }
+
+    /// Helper: create a FileService with a listening bus subscriber
+    fn create_service() -> (Arc<LockedBus>, FileService) {
+        let bus = Arc::new(LockedBus::new());
+        let service = FileService::new(bus.clone(), 256, 1024 * 1024);
+        (bus.clone(), service)
+    }
+
+    /// Helper: send file request and process it synchronously
+    fn send_and_process(bus: &Arc<LockedBus>, msg: KernelMsg, service: &FileService) {
+        bus.send(msg).unwrap();
+        wait_ms(50);
+        // Process one message
+        if let Ok(env) = service.receiver.try_recv() {
+            let _ = service.handle_envelope(env);
+        }
+    }
+
+    #[test]
+    fn test_create_and_list_directory() {
+        let (bus, service) = create_service();
+
+        // Create a directory
+        let msg = KernelMsg::File(FileRequest::CreateDirectory {
+            path: "/testdir".to_string(),
+        });
+        send_and_process(&bus, msg, &service);
+
+        // Verify it exists via Stat
+        let stat = KernelMsg::File(FileRequest::Stat {
+            path: "/testdir".to_string(),
+        });
+        send_and_process(&bus, stat, &service);
+
+        // List root directory
+        let ls = KernelMsg::File(FileRequest::OpenDirectory {
+            path: "/".to_string(),
+        });
+        send_and_process(&bus, ls, &service);
+
+        // Verify VFS has the directory
+        let vfs = service.vfs.lock().unwrap();
+        let root = vfs.lookup(0).unwrap();
+        let root_node = root.lock().unwrap();
+        assert!(root_node.children.contains_key("testdir"));
+    }
+
+    #[test]
+    fn test_create_nested_directories() {
+        let (bus, service) = create_service();
+
+        send_and_process(&bus, KernelMsg::File(FileRequest::CreateDirectory {
+            path: "/a".to_string(),
+        }), &service);
+        send_and_process(&bus, KernelMsg::File(FileRequest::CreateDirectory {
+            path: "/b".to_string(),
+        }), &service);
+
+        let vfs = service.vfs.lock().unwrap();
+        let root = vfs.lookup(0).unwrap();
+        let root_node = root.lock().unwrap();
+        assert!(root_node.children.contains_key("a"));
+        assert!(root_node.children.contains_key("b"));
+        assert_eq!(root_node.children.len(), 2);
+    }
+
+    #[test]
+    fn test_stat_directory() {
+        let (bus, service) = create_service();
+
+        send_and_process(&bus, KernelMsg::File(FileRequest::CreateDirectory {
+            path: "/mydir".to_string(),
+        }), &service);
+
+        let vfs = service.vfs.lock().unwrap();
+        // mydir should exist in root's children
+        let root = vfs.lookup(0).unwrap();
+        let root_node = root.lock().unwrap();
+        let mydir_inode = root_node.children.get("mydir").unwrap();
+        let mydir = vfs.lookup(*mydir_inode).unwrap();
+        let mydir_node = mydir.lock().unwrap();
+        assert_eq!(mydir_node.name, "mydir");
+    }
+
+    #[test]
+    fn test_delete_node() {
+        let (bus, service) = create_service();
+
+        // Create then delete
+        send_and_process(&bus, KernelMsg::File(FileRequest::CreateDirectory {
+            path: "/tempdir".to_string(),
+        }), &service);
+
+        send_and_process(&bus, KernelMsg::File(FileRequest::Unlink {
+            path: "/tempdir".to_string(),
+        }), &service);
+
+        // Root should no longer have tempdir
+        let vfs = service.vfs.lock().unwrap();
+        let root = vfs.lookup(0).unwrap();
+        let root_node = root.lock().unwrap();
+        assert!(!root_node.children.contains_key("tempdir"));
+    }
+
+    #[test]
+    fn test_unlink_nonexistent_graceful() {
+        let (bus, service) = create_service();
+        let msg = KernelMsg::File(FileRequest::Unlink {
+            path: "/nonexistent".to_string(),
+        });
+        bus.send(msg).unwrap();
+        wait_ms(100);
+        // Verify VFS is still in a valid state
+        let vfs = service.vfs.lock().unwrap();
+        assert!(vfs.lookup(0).is_some());
+    }
+
+    #[test]
+    fn test_create_many_directories() {
+        let (bus, service) = create_service();
+        for i in 0..10 {
+            send_and_process(&bus, KernelMsg::File(FileRequest::CreateDirectory {
+                path: format!("/dir{}", i),
+            }), &service);
+        }
+        let vfs = service.vfs.lock().unwrap();
+        let root = vfs.lookup(0).unwrap();
+        let root_node = root.lock().unwrap();
+        assert_eq!(root_node.children.len(), 10);
+    }
+
+    #[test]
+    fn test_vfs_inode_sequence() {
+        let (bus, service) = create_service();
+
+        send_and_process(&bus, KernelMsg::File(FileRequest::CreateDirectory {
+            path: "/first".to_string(),
+        }), &service);
+        send_and_process(&bus, KernelMsg::File(FileRequest::CreateDirectory {
+            path: "/second".to_string(),
+        }), &service);
+
+        let vfs = service.vfs.lock().unwrap();
+        let root = vfs.lookup(0).unwrap();
+        let root_node = root.lock().unwrap();
+        let first = root_node.children.get("first").unwrap();
+        let second = root_node.children.get("second").unwrap();
+        assert_eq!(*first, 1);
+        assert_eq!(*second, 2);
     }
 }

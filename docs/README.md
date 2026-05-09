@@ -48,6 +48,8 @@
 
 | 文档 | 说明 | 重要性 |
 |------|------|--------|
+|| **[🖥 Shell 命令参考](./SHELL_COMMANDS.md)** | 所有可用命令的详细说明、参数、用法示例和 KernelMsg 映射 | ⭐⭐⭐ |
+|| **[📂 FileService 设计文档](./FILE_SERVICE.md)** | 文件管理服务完整设计：VFS、文件描述符、目录操作、挂载 | ⭐⭐⭐ |
 || **[🎯 ProcessService 设计文档](./PROCESS_SERVICE.md)** | 进程管理服务完整设计：架构、组件、API、调度器、线程安全 | ⭐⭐⭐ |
 | **[硬件层与内核服务层协作指南](./HARDWARE_SERVICE_COORDINATION.md)** | 消息总线工作原理、消息传递流程、接口说明、实现框架 | ⭐⭐⭐ |
 | **[IPC 消息格式文档](./IPC_MESSAGE_FORMAT.md)** | 进程间通信协议、消息类型、同步原语、使用示例 | ⭐⭐⭐ |
@@ -61,9 +63,11 @@
 
 | 示例 | 说明 |
 |------|------|
-| **[IPC 消息演示](../examples/ipc_messages_demo.rs)** | 展示所有 IPC 消息类型的使用 |
-| **[块设备和设备管理器演示](../examples/block_device_demo.rs)** | 展示块设备和设备管理器的使用 |
-| **[响应机制示例](../examples/response_example.rs)** | RequestWithResponse 使用方法 |
+|| **[ProcessService 功能演示](../examples/process_demo.rs)** | 10 步完整演示进程管理、IPC、同步原语、调度 |
+|| **[FileService 功能演示](../examples/file_demo.rs)** | 目录创建、文件操作、挂载、元数据查询 |
+|| **[IPC 消息演示](../examples/ipc_messages_demo.rs)** | 展示所有 IPC 消息类型的使用 |
+|| **[块设备和设备管理器演示](../examples/block_device_demo.rs)** | 展示块设备和设备管理器的使用 |
+|| **[响应机制示例](../examples/response_example.rs)** | RequestWithResponse 使用方法 |
 
 ---
 
@@ -290,6 +294,48 @@ let data = mmu.read_u32(pid, user_vaddr)?;
 let state = cpu.dump_state();
 println!("CPU: {:#?}", state);
 ```
+
+## 💻 Shell 命令速查
+
+### 进程管理
+
+| 命令 | 参数 | 对应的 KernelMsg | 说明 |
+|------|------|-----------------|------|
+| `run <name> [args...]` | 可执行文件名 + 参数 | `Syscall::CreateProcess` | 创建新进程 |
+| `ps` | 无 | `ProcessRequest::ListProcesses` | 列出所有进程 |
+| `info <pid>` | 进程 ID | `ProcessRequest::GetProcessInfo` | 查看进程详情 |
+| `kill <pid> [sig]` | PID + 信号名 | `ProcessRequest::Signal` | 发送信号 |
+| `fork <pid>` | 父进程 PID | `ProcessRequest::ForkProcess` | Fork 子进程 |
+
+### IPC 通信
+
+| 命令 | 参数 | 对应的 KernelMsg | 说明 |
+|------|------|-----------------|------|
+| `send <from> <to> <msg>` | 发送方 + 接收方 + 文本 | `ProcessRequest::SendMessage` | 发送 IPC 消息 |
+
+### 同步原语
+
+| 命令 | 参数 | 对应的 KernelMsg | 说明 |
+|------|------|-----------------|------|
+| `sem create <pid> [n]` | PID + 初始值 | `ProcessRequest::CreateSemaphore` | 创建信号量 |
+| `sem wait <pid> <id>` | PID + 信号量ID | `ProcessRequest::WaitSemaphore` | P 操作 |
+| `sem signal <pid> <id>` | PID + 信号量ID | `ProcessRequest::SignalSemaphore` | V 操作 |
+| `lock create <pid>` | PID | `ProcessRequest::CreateLock` | 创建互斥锁 |
+| `lock acquire <pid> <id>` | PID + 锁ID | `ProcessRequest::AcquireLock` | 获取锁 |
+| `lock release <pid> <id>` | PID + 锁ID | `ProcessRequest::ReleaseLock` | 释放锁 |
+
+### 信号名速查
+
+| 参数 | 信号 | 行为 |
+|------|------|------|
+| `term` / `sigterm` | SIGTERM | 终止进程（可捕获） |
+| `kill` / `sigkill` | SIGKILL | 立即终止（不可捕获） |
+| `stop` / `sigstop` | SIGSTOP | 暂停进程 |
+| `cont` / `sigcont` | SIGCONT | 继续运行 |
+| `usr1` | SIGUSR1 | 用户自定义 1 |
+| `usr2` | SIGUSR2 | 用户自定义 2 |
+
+详细命令文档见 **[Shell 命令参考](./SHELL_COMMANDS.md)**。
 
 ---
 

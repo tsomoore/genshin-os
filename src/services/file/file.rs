@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use crate::messaging::Pid;
+use crate::hardware::VirtualDisk;
 use crate::{GenshinResult, GenshinError, ServiceError};
 
 /// File permissions (Unix-style)
@@ -117,6 +118,12 @@ pub struct File {
 
     /// EOF flag
     pub eof: bool,
+
+    /// Starting sector on disk (None = not on disk yet)
+    pub start_sector: Option<u32>,
+
+    /// Number of sectors allocated on disk
+    pub sector_count: u32,
 }
 
 /// Open mode
@@ -148,6 +155,8 @@ impl File {
             data: Vec::new(),
             dirty: false,
             eof: false,
+            start_sector: None,
+            sector_count: 0,
         }
     }
 
@@ -237,9 +246,51 @@ impl File {
         Ok(())
     }
 
-    /// Sync file data
+    /// Sync file data to disk sectors
+    pub fn sync_to_disk(&mut self, disk: &VirtualDisk) -> GenshinResult<()> {
+        if !self.dirty && self.start_sector.is_some() { return Ok(()); }
+        let needed = ((self.data.len() + 511) / 512) as u32;
+        if let Some(old) = self.start_sector {
+            if self.sector_count > 0 { let _ = disk.free_sectors(old, self.sector_count); }
+        }
+        if needed == 0 { self.start_sector = None; self.sector_count = 0; self.dirty = false; return Ok(()); }
+        let start = disk.allocate_sectors(needed)
+            .map_err(|e| GenshinError::Service(ServiceError::Io {
+                operation: "disk alloc".into(), details: format!("{:?}", e) }))?;
+        for i in 0..needed {
+            let offset = (i as usize) * 512;
+            let end = std::cmp::min(offset + 512, self.data.len());
+            let mut buf = vec![0u8; 512];
+            buf[..end - offset].copy_from_slice(&self.data[offset..end]);
+            disk.write_sector(start + i, &buf).map_err(|e| GenshinError::Service(ServiceError::Io {
+                operation: "disk write".into(), details: format!("{:?}", e) }))?;
+        }
+        self.start_sector = Some(start);
+        self.sector_count = needed;
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Load file data from disk sectors
+    pub fn load_from_disk(&mut self, disk: &VirtualDisk) -> GenshinResult<()> {
+        let start = match self.start_sector { Some(s) => s, None => { self.data.clear(); return Ok(()); } };
+        if self.sector_count == 0 { self.data.clear(); return Ok(()); }
+        let mut data = Vec::with_capacity(self.sector_count as usize * 512);
+        for i in 0..self.sector_count {
+            let sd = disk.read_sector(start + i).map_err(|e| GenshinError::Service(ServiceError::Io {
+                operation: "disk read".into(), details: format!("{:?}", e) }))?;
+            data.extend_from_slice(&sd);
+        }
+        data.truncate(self.metadata.size as usize);
+        self.data = data;
+        self.dirty = false;
+        self.eof = false;
+        self.position = 0;
+        Ok(())
+    }
+
+    /// Simple sync (no-op for backward compat, use sync_to_disk for real I/O)
     pub fn sync(&mut self) -> GenshinResult<()> {
-        // TODO: Write to disk
         self.dirty = false;
         Ok(())
     }

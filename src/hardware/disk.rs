@@ -22,10 +22,10 @@ pub const SECTOR_SIZE: usize = 512;
 /// 磁盘乃数据之粮仓，当以谨慎之心待之。
 #[derive(Clone)]
 pub struct VirtualDisk {
-    /// Disk data organized by sector
     data: Arc<Mutex<Vec<Vec<u8>>>>,
-    /// Total number of sectors
     total_sectors: u32,
+    /// Allocation bitmap (bit=1 means used)
+    bitmap: Arc<Mutex<Vec<u64>>>,
 }
 
 impl VirtualDisk {
@@ -37,15 +37,23 @@ impl VirtualDisk {
         if total_sectors == 0 {
             panic!("Disk must have at least one sector");
         }
+        if total_sectors < 8 {
+            panic!("Disk must have at least 8 sectors for filesystem metadata");
+        }
 
         let mut sectors = Vec::with_capacity(total_sectors as usize);
         for _ in 0..total_sectors {
             sectors.push(vec![0u8; SECTOR_SIZE]);
         }
 
+        let bitmap_words = ((total_sectors as usize) + 63) / 64;
+        let mut bitmap = vec![0u64; bitmap_words];
+        Self::mark_used_range(&mut bitmap, 0, 3); // reserve metadata sectors
+
         Self {
             data: Arc::new(Mutex::new(sectors)),
             total_sectors,
+            bitmap: Arc::new(Mutex::new(bitmap)),
         }
     }
 
@@ -178,6 +186,73 @@ impl VirtualDisk {
         }
 
         Ok(())
+    }
+
+    /// Mark a range of sectors as used in the bitmap
+    fn mark_used_range(bitmap: &mut [u64], start: u32, count: u32) {
+        for s in start..start + count {
+            let word = (s / 64) as usize;
+            let bit = (s % 64) as u64;
+            if word < bitmap.len() { bitmap[word] |= 1 << bit; }
+        }
+    }
+
+    /// Allocate N consecutive free sectors, return starting sector
+    pub fn allocate_sectors(&self, count: u32) -> Result<u32, DiskError> {
+        if count == 0 { return Err(DiskError::IoFailed { operation: "allocate".into(), sector: 0 }); }
+        let mut bitmap = self.bitmap.lock().map_err(|_| DiskError::Busy)?;
+        let total = self.total_sectors;
+        let mut consecutive: u32 = 0;
+        let mut start: u32 = 0;
+        for sector in 3..total {
+            let word = (sector / 64) as usize;
+            let bit = (sector % 64) as u64;
+            if bitmap[word] & (1 << bit) == 0 {
+                if consecutive == 0 { start = sector; }
+                consecutive += 1;
+                if consecutive == count {
+                    for s in start..start + count {
+                        let w = (s / 64) as usize;
+                        let b = (s % 64) as u64;
+                        bitmap[w] |= 1 << b;
+                    }
+                    return Ok(start);
+                }
+            } else { consecutive = 0; }
+        }
+        Err(DiskError::IoFailed { operation: format!("allocate {} sectors", count), sector: 0 })
+    }
+
+    /// Free previously allocated sectors
+    pub fn free_sectors(&self, start: u32, count: u32) -> Result<(), DiskError> {
+        if start < 3 { return Err(DiskError::InvalidSector { sector: start, max_sector: self.total_sectors }); }
+        self.check_sector(start + count - 1)?;
+        let mut bitmap = self.bitmap.lock().map_err(|_| DiskError::Busy)?;
+        for s in start..start + count {
+            let word = (s / 64) as usize;
+            let bit = (s % 64) as u64;
+            bitmap[word] &= !(1 << bit);
+        }
+        let mut data = self.data.lock().map_err(|_| DiskError::Busy)?;
+        for s in start..start + count {
+            for byte in data[s as usize].iter_mut() { *byte = 0; }
+        }
+        Ok(())
+    }
+
+    /// Get count of used sectors (from bitmap)
+    pub fn used_sectors_count(&self) -> usize {
+        let bitmap = self.bitmap.lock().unwrap();
+        let total = self.total_sectors as usize;
+        let mut used = 0usize;
+        for sector in 0..total {
+            let word = sector / 64;
+            let bit = (sector % 64) as u64;
+            if word < bitmap.len() && (bitmap[word] & (1 << bit)) != 0 {
+                used += 1;
+            }
+        }
+        used
     }
 
     /// Dump disk state for debugging/TUI display

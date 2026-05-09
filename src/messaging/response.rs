@@ -44,6 +44,12 @@ pub enum ResponseData {
     /// Physical address
     PhysicalAddr(u64),
 
+    /// Disk statistics
+    DiskStats {
+        total_sectors: u32,
+        used_sectors: usize,
+        total_bytes: u64,
+    },
     /// Raw bytes
     Bytes(Vec<u8>),
 
@@ -55,6 +61,9 @@ pub enum ResponseData {
 
     /// Boolean value
     Bool(bool),
+
+    /// List of strings
+    StringList(Vec<String>),
 }
 
 impl fmt::Display for ResponseData {
@@ -70,6 +79,10 @@ impl fmt::Display for ResponseData {
             Self::Integer(n) => write!(f, "{}", n),
             Self::String(s) => write!(f, "\"{}\"", s),
             Self::Bool(b) => write!(f, "{}", b),
+            Self::StringList(list) => write!(f, "[{}]", list.join(", ")),
+            Self::DiskStats { total_sectors, used_sectors, .. } => {
+                write!(f, "Disk({}/{} sectors)", used_sectors, total_sectors)
+            }
         }
     }
 }
