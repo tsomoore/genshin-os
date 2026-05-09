@@ -7,6 +7,7 @@
 use std::collections::{VecDeque, HashMap};
 use std::sync::{Arc, Mutex};
 use crate::messaging::{Pid, VirtAddr, PhysAddr};
+use crate::hardware::VirtualDisk;
 
 /// Swap slot on disk
 ///
@@ -117,30 +118,20 @@ pub struct SwapManager {
 
     /// Whether swap is enabled
     enabled: bool,
+    disk: VirtualDisk,
 }
 
 impl SwapManager {
     /// Create a new swap manager
-    pub fn new(config: SwapConfig) -> Self {
+    pub fn new(config: SwapConfig, disk: VirtualDisk) -> Self {
         let total_slots = (config.total_size / config.slot_size) as u64;
-
         let mut slots = Vec::new();
         let mut free_queue = VecDeque::new();
-
         for i in 0..total_slots {
             slots.push(SwapSlot::new(i, config.slot_size));
             free_queue.push_back(i);
         }
-
-        Self {
-            config,
-            slots,
-            free_queue,
-            process_slots: HashMap::new(),
-            total_slots,
-            used_slots: 0,
-            enabled: true,
-        }
+        Self { config, slots, free_queue, process_slots: HashMap::new(), total_slots, used_slots: 0, enabled: true, disk }
     }
 
     /// Enable swap
@@ -227,6 +218,35 @@ impl SwapManager {
         } else {
             Vec::new()
         }
+    }
+
+    /// Swap out frame data to disk
+    pub fn swap_out(&mut self, slot_num: u64, data: &[u8]) -> Result<(), String> {
+        let sectors_per_slot = 8; // 4096/512
+        let start = (slot_num * 8) as u32;
+        for i in 0..8 {
+            let off = i * 512;
+            let end = std::cmp::min(off + 512, data.len());
+            let mut buf = vec![0u8; 512];
+            if off < data.len() { buf[..end - off].copy_from_slice(&data[off..end]); }
+            self.disk.write_sector(start + i as u32, &buf)
+                .map_err(|e| format!("swap_out: {}", e))?;
+        }
+        Ok(())
+    }
+
+    /// Swap in frame data from disk
+    pub fn swap_in(&self, slot_num: u64) -> Result<Vec<u8>, String> {
+        let start = (slot_num * 8) as u32;
+        let mut data = vec![0u8; 4096];
+        for i in 0..8 {
+            let sd = self.disk.read_sector(start + i as u32)
+                .map_err(|e| format!("swap_in: {}", e))?;
+            let off = i * 512;
+            let end = std::cmp::min(off + 512, data.len());
+            data[off..end].copy_from_slice(&sd[..end - off]);
+        }
+        Ok(data)
     }
 
     /// Get swap statistics

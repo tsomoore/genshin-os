@@ -13,7 +13,7 @@ use crate::messaging::{
 };
 use crate::messaging::bus::Envelope;
 use crate::{GenshinError, GenshinResult, ServiceError};
-use crate::hardware::{PhysicalMemory, MMU};
+use crate::hardware::{PhysicalMemory, MMU, VirtualDisk};
 
 // Import memory service components
 use super::alloc::{FrameAllocator, Frame, PhysicalMemoryManager, MemoryUsage};
@@ -63,7 +63,8 @@ impl MemoryService {
         let size = hw.size();
         let memory_manager = Arc::new(Mutex::new(PhysicalMemoryManager::new(size, 4096)));
         let page_tables = Arc::new(Mutex::new(PageTableManager::new(4096, 256)));
-        let swap_manager = Arc::new(Mutex::new(SwapManager::new(SwapConfig::default())));
+        let swap_disk = VirtualDisk::new(256); // 256 sectors for swap (128KB)
+        let swap_manager = Arc::new(Mutex::new(SwapManager::new(SwapConfig::default(), swap_disk)));
         let hardware_memory = Arc::new(Mutex::new(hw));
         Self { bus, receiver, memory_manager, page_tables, swap_manager, hardware_memory, mmu }
     }
@@ -632,9 +633,18 @@ impl MemoryService {
                 })
             })?;
 
-        println!("MemoryService: Swapped out pid {} page {:#x} to swap slot {}", pid, virt, slot.number);
-
-        // TODO: Actually write to swap device
+        // Read frame data from physical memory via MMU
+        let mut frame_data = vec![0u8; 4096];
+        if let Ok(paddr) = self.mmu.translate(pid, virt, crate::messaging::AccessType::Read) {
+            let hw = self.hardware_memory.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 80, msg: "lock".into() }))?;
+            let _ = hw.read_slice(paddr as usize, &mut frame_data);
+        }
+        // Write to swap disk
+        if let Err(e) = swap.swap_out(slot.number, &frame_data) {
+            let _ = envelope.respond_error(MessagingServiceError::Other { code: 81, msg: e });
+            return Err(GenshinError::Service(ServiceError::Other { code: 81, msg: "swap_out failed".into() }));
+        }
+        println!("MemoryService: Swapped out pid {} page {:#x} to slot {}", pid, virt, slot.number);
         let _ = envelope.respond_success(ResponseData::Integer(slot.number));
         Ok(())
     }
@@ -691,9 +701,22 @@ impl MemoryService {
         // Free the swap slot
         swap.free_slot(slot.number);
 
-        // TODO: Actually read from swap device
-        let _ = envelope.respond_success(ResponseData::Void);
-        Ok(())
+        // Read frame data from swap disk and write to physical memory
+        match swap.swap_in(slot.number) {
+            Ok(frame_data) => {
+                if let Ok(paddr) = self.mmu.translate(pid, virt, crate::messaging::AccessType::Write) {
+                    let hw = self.hardware_memory.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 82, msg: "lock".into() }))?;
+                    hw.write_slice(paddr as usize, &frame_data).map_err(|_| GenshinError::Service(ServiceError::Other { code: 83, msg: "write".into() }))?;
+                }
+                println!("MemoryService: Swapped in pid {} page {:#x} from slot {}", pid, virt, slot.number);
+                let _ = envelope.respond_success(ResponseData::Void);
+                Ok(())
+            }
+            Err(e) => {
+                let _ = envelope.respond_error(MessagingServiceError::Other { code: 84, msg: e });
+                Err(GenshinError::Service(ServiceError::Other { code: 84, msg: "swap_in failed".into() }))
+            }
+        }
     }
 
     // ========== Query Methods ==========
