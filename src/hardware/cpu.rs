@@ -214,6 +214,7 @@ pub struct CPUState {
     pub halted: bool,
     pub current_pid: Pid,
     pub instruction_count: u64,
+    pub pagefault_pending: bool,
 }
 
 /// Virtual CPU
@@ -253,6 +254,7 @@ pub struct VirtualCPU {
 
     /// Instruction counter (for stats/debugging)
     instruction_count: u64,
+    pub pagefault_pending: bool,
 }
 
 impl VirtualCPU {
@@ -268,6 +270,7 @@ impl VirtualCPU {
             mmu,
             bus,
             instruction_count: 0,
+            pagefault_pending: false,
         }
     }
 
@@ -334,6 +337,7 @@ impl VirtualCPU {
         self.flags = CPUFlags::new();
         self.halted = false;
         self.instruction_count = 0;
+        self.pagefault_pending = false;
     }
 
     /// Execute one instruction: fetch-decode-execute cycle
@@ -342,21 +346,25 @@ impl VirtualCPU {
     /// "读书之法，循序而渐进；执行之法，按步而推进。"
     /// 每一步都不能跳过，否则必出大错。
     pub fn step(&mut self) -> Result<(), CPUError> {
-        // 1. Check if halted
-        if self.halted {
-            return Err(CPUError::Halted);
+        if self.halted { return Err(CPUError::Halted); }
+        if self.pagefault_pending { return Ok(()); }
+
+        match self.fetch_instruction() {
+            Ok(instr) => {
+                self.execute_instruction(instr)?;
+                self.instruction_count += 1;
+                Ok(())
+            }
+            Err(CPUError::PageFault { vaddr, .. }) => {
+                let msg = KernelMsg::Interrupt(Interrupt::PageFault {
+                    addr: vaddr, access_type: crate::messaging::AccessType::Read,
+                });
+                let _ = self.bus.send(msg);
+                self.pagefault_pending = true;
+                Ok(())
+            }
+            Err(e) => Err(e),
         }
-
-        // 2. Fetch instruction from memory
-        let instr = self.fetch_instruction()?;
-
-        // 3. Decode and execute
-        self.execute_instruction(instr)?;
-
-        // 4. Update instruction count
-        self.instruction_count += 1;
-
-        Ok(())
     }
 
     /// Fetch instruction from memory at PC
@@ -649,6 +657,7 @@ impl VirtualCPU {
             halted: self.halted,
             current_pid: self.current_pid,
             instruction_count: self.instruction_count,
+            pagefault_pending: self.pagefault_pending,
         }
     }
 
@@ -661,6 +670,7 @@ impl VirtualCPU {
         self.halted = state.halted;
         self.current_pid = state.current_pid;
         self.instruction_count = state.instruction_count;
+        self.pagefault_pending = state.pagefault_pending;
     }
 
     /// Dump CPU state for debugging/TUI display
