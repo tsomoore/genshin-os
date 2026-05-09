@@ -143,7 +143,7 @@ impl Shell {
             }
             "verbose" => {
                 let on = command.args.first().map(|s| s.as_str()).unwrap_or("on");
-                genshin_os::verbose::set_verbose(on == "on");
+                crate::verbose::set_verbose(on == "on");
                 println!("verbose: {}", if on == "on" { "on" } else { "off" });
                 Ok(())
             }
