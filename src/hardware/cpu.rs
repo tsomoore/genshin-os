@@ -155,6 +155,18 @@ pub enum Instruction {
         vector: u8,
     },
 
+    /// LOAD.B dst, addr — load byte from memory into register
+    Load {
+        dst: Register,
+        addr: Operand,
+    },
+
+    /// STORE.B src, addr — store byte from register to memory
+    Store {
+        src: Register,
+        addr: Operand,
+    },
+
     /// HALT - Stop execution
     Halt,
 }
@@ -175,11 +187,13 @@ impl fmt::Display for Instruction {
             Self::Mul { dst, src } => write!(f, "MUL {}, {}", dst, src),
             Self::Div { dst, src } => write!(f, "DIV {}, {}", dst, src),
             Self::Jmp { addr } => write!(f, "JMP {:#x}", addr),
+            Self::Load { dst, addr } => write!(f, "LOAD {}, [{}]", dst, addr),
+            Self::Store { src, addr } => write!(f, "STORE [{}], {}", addr, src),
             Self::Int { vector } => write!(f, "INT {:#x}", vector),
             Self::Halt => write!(f, "HALT"),
         }
     }
-}
+    }
 
 impl fmt::Display for Operand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -427,8 +441,31 @@ impl VirtualCPU {
                 };
                 Instruction::Div { dst, src }
             }
+            0x06 => {
+                // LOAD dst, addr
+                let dst = Register::from_index(dst_reg as usize)
+                    .ok_or(CPUError::InvalidRegister { index: dst_reg as usize })?;
+                let addr = if src_type == 0 {
+                    Operand::Reg(Register::from_index(src_value as usize)
+                        .ok_or(CPUError::InvalidRegister { index: src_value as usize })?)
+                } else {
+                    Operand::Imm(src_value)
+                };
+                Instruction::Load { dst, addr }
+            }
+            0x07 => {
+                // STORE src, addr
+                let src = Register::from_index(dst_reg as usize)
+                    .ok_or(CPUError::InvalidRegister { index: dst_reg as usize })?;
+                let addr = if src_type == 0 {
+                    Operand::Reg(Register::from_index(src_value as usize)
+                        .ok_or(CPUError::InvalidRegister { index: src_value as usize })?)
+                } else {
+                    Operand::Imm(src_value)
+                };
+                Instruction::Store { src, addr }
+            }
             0x10 => {
-                // JMP
                 Instruction::Jmp { addr: src_value }
             }
             0x80 => {
@@ -522,6 +559,20 @@ impl VirtualCPU {
                 let result = dst_val / src_val;
                 self.flags = CPUFlags::from_result(result, dst_val, src_val);
                 self.write_register(dst, result);
+            }
+
+            Instruction::Load { dst, addr } => {
+                let address = self.read_operand(addr);
+                let value = self.mmu.read_u8(self.current_pid, address)
+                    .map_err(|_| CPUError::PageFault { vaddr: address, access_type: ErrorAccessType::Read })? as u64;
+                self.write_register(dst, value);
+            }
+
+            Instruction::Store { src, addr } => {
+                let address = self.read_operand(addr);
+                let value = self.read_register(src);
+                self.mmu.write_u8(self.current_pid, address, value as u8)
+                    .map_err(|_| CPUError::PageFault { vaddr: address, access_type: ErrorAccessType::Write })?;
             }
 
             Instruction::Jmp { addr } => {

@@ -11,6 +11,8 @@ const OP_ADD: u8 = 0x02;
 const OP_SUB: u8 = 0x03;
 const OP_MUL: u8 = 0x04;
 const OP_DIV: u8 = 0x05;
+const OP_LOAD: u8 = 0x06;
+const OP_STORE: u8 = 0x07;
 const OP_JMP: u8 = 0x10;
 const OP_INT: u8 = 0x80;
 const OP_HALT: u8 = 0xFF;
@@ -109,6 +111,22 @@ fn parse_line(line: &str, line_num: usize) -> Option<Vec<u8>> {
             Some(encode(OP_JMP, 0, SRC_IMM, addr))
         }
 
+        "LOAD" => {
+            if parts.len() < 3 { eprintln!("  asm:{}: LOAD requires dst and [addr]", line_num); return None; }
+            let dst = reg_index(parts[1].trim_end_matches(','))?;
+            let addr_str = parts[2];
+            let (addr_type, addr_val) = parse_mem_operand(addr_str)?;
+            Some(encode(OP_LOAD, dst, addr_type, addr_val))
+        }
+
+        "STORE" => {
+            if parts.len() < 3 { eprintln!("  asm:{}: STORE requires [addr] and src", line_num); return None; }
+            let addr_str = parts[1];
+            let src = reg_index(parts[2].trim_end_matches(','))?;
+            let (addr_type, addr_val) = parse_mem_operand(addr_str)?;
+            Some(encode(OP_STORE, src, addr_type, addr_val))
+        }
+
         "INT" => {
             if parts.len() < 2 {
                 eprintln!("  asm:{}: INT requires a vector", line_num);
@@ -122,6 +140,17 @@ fn parse_line(line: &str, line_num: usize) -> Option<Vec<u8>> {
             eprintln!("  asm:{}: unknown mnemonic '{}'", line_num, mnemonic);
             None
         }
+    }
+}
+
+fn parse_mem_operand(s: &str) -> Option<(u8, u64)> {
+    let s = s.trim();
+    // Format: [0x100] or [R0]
+    let inner = s.strip_prefix('[').and_then(|t| t.strip_suffix(']'))?;
+    if let Some(idx) = reg_index(inner) {
+        Some((SRC_REG, idx as u64)) // SRC_REG = 0 means register addressing
+    } else {
+        Some((SRC_IMM, parse_immediate(inner)?))
     }
 }
 
