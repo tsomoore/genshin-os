@@ -1063,7 +1063,10 @@ impl ProcessService {
             0 => cpu.halt(),
             1 => println!("[PRINT] {}", r1 as i64),
             2 => {
-                let s = String::from_utf8_lossy(&self.read_bytes_virt(pid, r1, r2 as usize));
+                let data = self.read_bytes_virt(pid, r1, r2 as usize);
+                let s = String::from_utf8_lossy(&data);
+                println!("{}", s);
+            },
                 println!("{}", s);
             },
             10 => {
