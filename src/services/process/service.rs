@@ -1,3 +1,4 @@
+use crate::vprintln;
 // ProcessService - Main Process Management Service
 //
 // 曾国藩曰：
@@ -292,7 +293,7 @@ impl ProcessService {
             Syscall::CreateProcess { executable, args } => {
                 let pid = self.create_process(&executable, args)?;
                 envelope.respond_success(ResponseData::Pid(pid))?;
-                println!("ProcessService: Created process {} ({})", pid, executable);
+                vprintln!("ProcessService: Created process {} ({})", pid, executable);
             }
 
             Syscall::ExitProcess { exit_code } => {
@@ -317,7 +318,7 @@ impl ProcessService {
         match syscall {
             Syscall::CreateProcess { executable, args } => {
                 let pid = self.create_process(&executable, args)?;
-                println!("ProcessService: Created process {} ({})", pid, executable);
+                vprintln!("ProcessService: Created process {} ({})", pid, executable);
             }
 
             Syscall::ExitProcess { exit_code } => {
@@ -469,7 +470,7 @@ impl ProcessService {
                         }
                     }
                     let s = cpu.dump_state();
-                    println!("CPU[{}]: PC={:#06x} R0={} R1={} R2={} R3={} | IC={} {}",
+                    vprintln!("CPU[{}]: PC={:#06x} R0={} R1={} R2={} R3={} | IC={} {}",
                         pid, s.pc, s.registers[0] as i64, s.registers[1] as i64,
                         s.registers[2] as i64, s.registers[3] as i64,
                         s.instruction_count, if cpu.is_halted() { "[HALTED]" } else { "" });
@@ -556,7 +557,7 @@ impl ProcessService {
 
         let shmid = ipc.create_shared_memory(pid, size, physical_addr, prot);
 
-        println!("ProcessService: Created shared memory {} for process {} (size: {})", shmid, pid, size);
+        vprintln!("ProcessService: Created shared memory {} for process {} (size: {})", shmid, pid, size);
         Ok(())
     }
 
@@ -588,7 +589,7 @@ impl ProcessService {
         let mut sync = Self::lock_mutex(&self.sync_manager)?;
         let semid = sync.create_semaphore(pid, initial_value);
 
-        println!("ProcessService: Created semaphore {} for process {} (initial: {})", semid, pid, initial_value);
+        vprintln!("ProcessService: Created semaphore {} for process {} (initial: {})", semid, pid, initial_value);
         Ok(())
     }
 
@@ -634,7 +635,7 @@ impl ProcessService {
         let mut sync = Self::lock_mutex(&self.sync_manager)?;
         let lock_id = sync.create_mutex(pid, false);
 
-        println!("ProcessService: Created lock {} for process {}", lock_id, pid);
+        vprintln!("ProcessService: Created lock {} for process {}", lock_id, pid);
         Ok(())
     }
 
@@ -929,7 +930,7 @@ impl ProcessService {
         // Try assembler file first
         let path = format!("programs/{}.asm", name);
         if let Ok((_, code)) = super::assembler::assemble_file(&path) {
-            println!("PS: Loaded {}", path);
+            vprintln!("PS: Loaded {}", path);
             return Some(code);
         }
         None
@@ -964,7 +965,7 @@ impl ProcessService {
             }
             let mut cpus = self.cpus.lock().unwrap();
             if let Some(cpu) = cpus.remove(&pid) {
-                println!("PS: '{}' done after {} instructions", executable, cpu.dump_state().instruction_count);
+                vprintln!("PS: '{}' done after {} instructions", executable, cpu.dump_state().instruction_count);
             }
             self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
             self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
@@ -974,7 +975,7 @@ impl ProcessService {
             self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
                 .insert(pid, Arc::new(Mutex::new(pcb)));
             self.handle_schedule(pid, 1)?;
-            println!("PS: Created {} (no code)", pid);
+            vprintln!("PS: Created {} (no code)", pid);
         }
         Ok(pid)
     }
@@ -1010,7 +1011,7 @@ impl ProcessService {
 
         let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
         cpu.set_pc(0); cpu.set_sp(0xFFFF);
-        println!("PS: Spawn '{}' (PID {}, {} bytes)", program, pid, prog.len());
+        vprintln!("PS: Spawn '{}' (PID {}, {} bytes)", program, pid, prog.len());
 
         // Submit to scheduler, drive via timer (no direct CPU loop)
         {
@@ -1030,7 +1031,7 @@ impl ProcessService {
 
         let mut cpus = self.cpus.lock().unwrap();
         if let Some(cpu) = cpus.remove(&pid) {
-            println!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
+            vprintln!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
         }
         self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
         self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();

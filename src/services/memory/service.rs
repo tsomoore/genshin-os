@@ -1,3 +1,4 @@
+use crate::vprintln;
 // MemoryService - Memory and Storage Management Service
 //
 // 曾国藩曰：
@@ -207,7 +208,7 @@ impl MemoryService {
                 eprintln!("MemoryService: Hardware failure in {}", component);
             }
             _ => {
-                println!("MemoryService: Received interrupt {:?}", interrupt);
+                vprintln!("MemoryService: Received interrupt {:?}", interrupt);
             }
         }
         Ok(())
@@ -229,7 +230,7 @@ impl MemoryService {
             }));
         }
 
-        println!("MemoryService: Allocated {} frames", count);
+        vprintln!("MemoryService: Allocated {} frames", count);
 
         // In real implementation, would return frame addresses via response channel
         Ok(())
@@ -252,7 +253,7 @@ impl MemoryService {
             }));
         }
 
-        println!("MemoryService: Allocated {} frames", count);
+        vprintln!("MemoryService: Allocated {} frames", count);
 
         // Return the first frame address as response
         let first_frame_addr = frames.first().map(|f| f.address).unwrap_or(0);
@@ -269,7 +270,7 @@ impl MemoryService {
         let freed = memory.free_frame(0, frame_num);
 
         if freed {
-            println!("MemoryService: Freed frame at {:#x}", paddr);
+            vprintln!("MemoryService: Freed frame at {:#x}", paddr);
             Ok(())
         } else {
             Err(GenshinError::Service(ServiceError::NotFound {
@@ -287,7 +288,7 @@ impl MemoryService {
         let freed = memory.free_frame(0, frame_num);
 
         if freed {
-            println!("MemoryService: Freed frame at {:#x}", paddr);
+            vprintln!("MemoryService: Freed frame at {:#x}", paddr);
             envelope.respond_success(ResponseData::Void)?;
             Ok(())
         } else {
@@ -323,7 +324,7 @@ impl MemoryService {
 
         match result {
             Ok(_) => {
-                println!("MemoryService: Mapped {:#x} -> {:#x} for pid {}", virt, phys, pid);
+                vprintln!("MemoryService: Mapped {:#x} -> {:#x} for pid {}", virt, phys, pid);
                 Ok(())
             }
             Err(PageError::AlreadyMapped { vpn }) => {
@@ -356,7 +357,7 @@ impl MemoryService {
         };
         match self.mmu.map_page(pid, virt, phys, flags) {
             Ok(_) => {
-                println!("MemoryService: Mapped {:#x} -> {:#x} for pid {}", virt, phys, pid);
+                vprintln!("MemoryService: Mapped {:#x} -> {:#x} for pid {}", virt, phys, pid);
                 let _ = envelope.respond_success(ResponseData::Void);
                 Ok(())
             }
@@ -370,7 +371,7 @@ impl MemoryService {
     fn handle_unmap_page_with_response(&self, pid: Pid, virt: VirtAddr, envelope: &Envelope) -> GenshinResult<()> {
         match self.mmu.unmap_page(pid, virt) {
             Ok(_) => {
-                println!("MemoryService: Unmapped {:#x} for pid {}", virt, pid);
+                vprintln!("MemoryService: Unmapped {:#x} for pid {}", virt, pid);
                 let _ = envelope.respond_success(ResponseData::Void);
                 Ok(())
             }
@@ -384,7 +385,7 @@ impl MemoryService {
     // ========== Page Fault Handling ==========
 
     fn handle_page_fault(&self, pid: Pid, faulting_addr: VirtAddr, access_type: AccessType) -> GenshinResult<()> {
-        println!("MemoryService: Page fault for pid {} at {:#x} ({:?})", pid, faulting_addr, access_type);
+        vprintln!("MemoryService: Page fault for pid {} at {:#x} ({:?})", pid, faulting_addr, access_type);
 
         // Get page table
         let page_tables = Self::lock_mutex(&self.page_tables)?;
@@ -428,7 +429,7 @@ impl MemoryService {
             }
 
             // TODO: Implement actual swap out logic
-            println!("MemoryService: Would swap out page (not implemented)");
+            vprintln!("MemoryService: Would swap out page (not implemented)");
         } else {
             let frame = frames[0];
             drop(memory);
@@ -448,7 +449,7 @@ impl MemoryService {
     }
 
     fn handle_page_fault_with_response(&self, pid: Pid, faulting_addr: VirtAddr, access_type: AccessType, envelope: &Envelope) -> GenshinResult<()> {
-        println!("MemoryService: Page fault for pid {} at {:#x} ({:?})", pid, faulting_addr, access_type);
+        vprintln!("MemoryService: Page fault for pid {} at {:#x} ({:?})", pid, faulting_addr, access_type);
 
         // Get page table
         let page_tables = Self::lock_mutex(&self.page_tables)?;
@@ -504,7 +505,7 @@ impl MemoryService {
             }
 
             // TODO: Implement actual swap out logic
-            println!("MemoryService: Would swap out page (not implemented)");
+            vprintln!("MemoryService: Would swap out page (not implemented)");
         } else {
             let frame = frames[0];
             drop(memory);
@@ -545,7 +546,7 @@ impl MemoryService {
                 requested: 1,
             }))?;
 
-        println!("MemoryService: Swapped out pid {} page {:#x} to swap slot {}", pid, virt, slot.number);
+        vprintln!("MemoryService: Swapped out pid {} page {:#x} to swap slot {}", pid, virt, slot.number);
 
         // TODO: Actually write to swap device
         Ok(())
@@ -589,7 +590,7 @@ impl MemoryService {
             let _ = envelope.respond_error(MessagingServiceError::Other { code: 81, msg: e });
             return Err(GenshinError::Service(ServiceError::Other { code: 81, msg: "swap_out failed".into() }));
         }
-        println!("MemoryService: Swapped out pid {} page {:#x} to slot {}", pid, virt, slot.number);
+        vprintln!("MemoryService: Swapped out pid {} page {:#x} to slot {}", pid, virt, slot.number);
         let _ = envelope.respond_success(ResponseData::Integer(slot.number));
         Ok(())
     }
@@ -610,7 +611,7 @@ impl MemoryService {
                 id: format!("VPN {}", vpn),
             }))?;
 
-        println!("MemoryService: Swapped in pid {} page {:#x} from swap slot {}", pid, virt, slot.number);
+        vprintln!("MemoryService: Swapped in pid {} page {:#x} from swap slot {}", pid, virt, slot.number);
 
         // Free the swap slot
         swap.free_slot(slot.number);
@@ -641,7 +642,7 @@ impl MemoryService {
                 })
             })?;
 
-        println!("MemoryService: Swapped in pid {} page {:#x} from swap slot {}", pid, virt, slot.number);
+        vprintln!("MemoryService: Swapped in pid {} page {:#x} from swap slot {}", pid, virt, slot.number);
 
         // Free the swap slot
         swap.free_slot(slot.number);
@@ -653,7 +654,7 @@ impl MemoryService {
                     let hw = self.hardware_memory.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 82, msg: "lock".into() }))?;
                     hw.write_slice(paddr as usize, &frame_data).map_err(|_| GenshinError::Service(ServiceError::Other { code: 83, msg: "write".into() }))?;
                 }
-                println!("MemoryService: Swapped in pid {} page {:#x} from slot {}", pid, virt, slot.number);
+                vprintln!("MemoryService: Swapped in pid {} page {:#x} from slot {}", pid, virt, slot.number);
                 let _ = envelope.respond_success(ResponseData::Void);
                 Ok(())
             }
