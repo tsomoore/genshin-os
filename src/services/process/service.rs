@@ -948,7 +948,7 @@ impl ProcessService {
         let base = (pid as u64) * 0x40000;
 
         // Map page
-        // Request page mapping from StorageService
+        // Request page mapping from MemoryService
         let _ = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
             pid, virt: 0, phys: base,
             prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },

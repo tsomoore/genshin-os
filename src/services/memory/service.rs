@@ -1,8 +1,8 @@
-// StorageService - Memory and Storage Management Service
+// MemoryService - Memory and Storage Management Service
 //
 // 曾国藩曰：
 // "仓储管理，当井井有条。"
-// 存储服务管理内存分配、分页和交换，确保系统高效运行。
+// 内存服务管理内存分配、分页和交换，确保系统高效运行。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,17 +15,17 @@ use crate::messaging::bus::Envelope;
 use crate::{GenshinError, GenshinResult, ServiceError};
 use crate::hardware::{PhysicalMemory, MMU};
 
-// Import storage service components
-use super::memory::{FrameAllocator, Frame, PhysicalMemoryManager, MemoryUsage};
+// Import memory service components
+use super::alloc::{FrameAllocator, Frame, PhysicalMemoryManager, MemoryUsage};
 use super::paging::{PageTable, PageTableManager, PageTableEntry, PageFlags, PageError};
 use super::swap::{SwapManager, SwapConfig, SwapPolicy, SwapResult};
 
-/// Storage Service - Main storage management service
+/// Memory Service - Main storage management service
 ///
 /// 曾国藩曰：
 /// "统管钱粮，当知其入出。"
-/// 存储服务统筹内存管理、页表维护和交换策略。
-pub struct StorageService {
+/// 内存服务统筹内存管理、页表维护和交换策略。
+pub struct MemoryService {
     /// Message bus
     bus: Arc<dyn MessageBus>,
 
@@ -46,7 +46,7 @@ pub struct StorageService {
     mmu: Arc<MMU>,
 }
 
-impl StorageService {
+impl MemoryService {
     /// Helper function to lock mutex and convert poison errors
     fn lock_mutex<T>(mutex: &Mutex<T>) -> GenshinResult<std::sync::MutexGuard<T>> {
         mutex.lock().map_err(|e| {
@@ -57,7 +57,7 @@ impl StorageService {
         })
     }
 
-    /// Create a new storage service
+    /// Create a new memory service
     pub fn new(bus: Arc<dyn MessageBus>, hw: PhysicalMemory, mmu: Arc<MMU>) -> Self {
         let receiver = bus.subscribe();
         let size = hw.size();
@@ -68,15 +68,15 @@ impl StorageService {
         Self { bus, receiver, memory_manager, page_tables, swap_manager, hardware_memory, mmu }
     }
 
-    /// Run the storage service (main loop)
+    /// Run the memory service (main loop)
     pub fn run(&self) {
-        println!("StorageService starting...");
+        println!("MemoryService starting...");
 
         loop {
             match self.receiver.recv() {
                 Ok(envelope) => {
                     if let Err(e) = self.handle_envelope(envelope) {
-                        eprintln!("StorageService error: {}", e);
+                        eprintln!("MemoryService error: {}", e);
                     }
                 }
                 Err(_) => {
@@ -107,7 +107,7 @@ impl StorageService {
 
         // Log errors but don't fail the service
         if let Err(e) = result {
-            eprintln!("StorageService error handling message: {}", e);
+            eprintln!("MemoryService error handling message: {}", e);
 
             // If this was a request, send error response
             if envelope.expects_response() {
@@ -203,10 +203,10 @@ impl StorageService {
     fn handle_interrupt(&self, interrupt: crate::messaging::Interrupt) -> GenshinResult<()> {
         match interrupt {
             crate::messaging::Interrupt::HardwareFailure { component } => {
-                eprintln!("StorageService: Hardware failure in {}", component);
+                eprintln!("MemoryService: Hardware failure in {}", component);
             }
             _ => {
-                println!("StorageService: Received interrupt {:?}", interrupt);
+                println!("MemoryService: Received interrupt {:?}", interrupt);
             }
         }
         Ok(())
@@ -228,7 +228,7 @@ impl StorageService {
             }));
         }
 
-        println!("StorageService: Allocated {} frames", count);
+        println!("MemoryService: Allocated {} frames", count);
 
         // In real implementation, would return frame addresses via response channel
         Ok(())
@@ -251,7 +251,7 @@ impl StorageService {
             }));
         }
 
-        println!("StorageService: Allocated {} frames", count);
+        println!("MemoryService: Allocated {} frames", count);
 
         // Return the first frame address as response
         let first_frame_addr = frames.first().map(|f| f.address).unwrap_or(0);
@@ -268,7 +268,7 @@ impl StorageService {
         let freed = memory.free_frame(0, frame_num);
 
         if freed {
-            println!("StorageService: Freed frame at {:#x}", paddr);
+            println!("MemoryService: Freed frame at {:#x}", paddr);
             Ok(())
         } else {
             Err(GenshinError::Service(ServiceError::NotFound {
@@ -286,7 +286,7 @@ impl StorageService {
         let freed = memory.free_frame(0, frame_num);
 
         if freed {
-            println!("StorageService: Freed frame at {:#x}", paddr);
+            println!("MemoryService: Freed frame at {:#x}", paddr);
             envelope.respond_success(ResponseData::Void)?;
             Ok(())
         } else {
@@ -322,7 +322,7 @@ impl StorageService {
 
         match result {
             Ok(_) => {
-                println!("StorageService: Mapped {:#x} -> {:#x} for pid {}", virt, phys, pid);
+                println!("MemoryService: Mapped {:#x} -> {:#x} for pid {}", virt, phys, pid);
                 Ok(())
             }
             Err(PageError::AlreadyMapped { vpn }) => {
@@ -347,7 +347,7 @@ impl StorageService {
             let mut table = Self::lock_mutex(&table)?;
             match table.unmap(virt) {
                 Ok(_) => {
-                    println!("StorageService: Unmapped {:#x} for pid {}", virt, pid);
+                    println!("MemoryService: Unmapped {:#x} for pid {}", virt, pid);
                     Ok(())
                 }
                 Err(PageError::NotMapped { vpn }) => {
@@ -380,7 +380,7 @@ impl StorageService {
         };
         match self.mmu.map_page(pid, virt, phys, flags) {
             Ok(_) => {
-                println!("StorageService: Mapped {:#x} -> {:#x} for pid {}", virt, phys, pid);
+                println!("MemoryService: Mapped {:#x} -> {:#x} for pid {}", virt, phys, pid);
                 let _ = envelope.respond_success(ResponseData::Void);
                 Ok(())
             }
@@ -398,7 +398,7 @@ impl StorageService {
             let mut table = Self::lock_mutex(&table)?;
             match table.unmap(virt) {
                 Ok(_) => {
-                    println!("StorageService: Unmapped {:#x} for pid {}", virt, pid);
+                    println!("MemoryService: Unmapped {:#x} for pid {}", virt, pid);
                     let _ = envelope.respond_success(ResponseData::Void);
                     Ok(())
                 }
@@ -438,7 +438,7 @@ impl StorageService {
     // ========== Page Fault Handling ==========
 
     fn handle_page_fault(&self, pid: Pid, faulting_addr: VirtAddr, access_type: AccessType) -> GenshinResult<()> {
-        println!("StorageService: Page fault for pid {} at {:#x} ({:?})", pid, faulting_addr, access_type);
+        println!("MemoryService: Page fault for pid {} at {:#x} ({:?})", pid, faulting_addr, access_type);
 
         // Get page table
         let page_tables = Self::lock_mutex(&self.page_tables)?;
@@ -482,7 +482,7 @@ impl StorageService {
             }
 
             // TODO: Implement actual swap out logic
-            println!("StorageService: Would swap out page (not implemented)");
+            println!("MemoryService: Would swap out page (not implemented)");
         } else {
             let frame = frames[0];
             drop(memory);
@@ -502,7 +502,7 @@ impl StorageService {
     }
 
     fn handle_page_fault_with_response(&self, pid: Pid, faulting_addr: VirtAddr, access_type: AccessType, envelope: &Envelope) -> GenshinResult<()> {
-        println!("StorageService: Page fault for pid {} at {:#x} ({:?})", pid, faulting_addr, access_type);
+        println!("MemoryService: Page fault for pid {} at {:#x} ({:?})", pid, faulting_addr, access_type);
 
         // Get page table
         let page_tables = Self::lock_mutex(&self.page_tables)?;
@@ -558,7 +558,7 @@ impl StorageService {
             }
 
             // TODO: Implement actual swap out logic
-            println!("StorageService: Would swap out page (not implemented)");
+            println!("MemoryService: Would swap out page (not implemented)");
         } else {
             let frame = frames[0];
             drop(memory);
@@ -599,7 +599,7 @@ impl StorageService {
                 requested: 1,
             }))?;
 
-        println!("StorageService: Swapped out pid {} page {:#x} to swap slot {}", pid, virt, slot.number);
+        println!("MemoryService: Swapped out pid {} page {:#x} to swap slot {}", pid, virt, slot.number);
 
         // TODO: Actually write to swap device
         Ok(())
@@ -632,7 +632,7 @@ impl StorageService {
                 })
             })?;
 
-        println!("StorageService: Swapped out pid {} page {:#x} to swap slot {}", pid, virt, slot.number);
+        println!("MemoryService: Swapped out pid {} page {:#x} to swap slot {}", pid, virt, slot.number);
 
         // TODO: Actually write to swap device
         let _ = envelope.respond_success(ResponseData::Integer(slot.number));
@@ -655,7 +655,7 @@ impl StorageService {
                 id: format!("VPN {}", vpn),
             }))?;
 
-        println!("StorageService: Swapped in pid {} page {:#x} from swap slot {}", pid, virt, slot.number);
+        println!("MemoryService: Swapped in pid {} page {:#x} from swap slot {}", pid, virt, slot.number);
 
         // Free the swap slot
         swap.free_slot(slot.number);
@@ -686,7 +686,7 @@ impl StorageService {
                 })
             })?;
 
-        println!("StorageService: Swapped in pid {} page {:#x} from swap slot {}", pid, virt, slot.number);
+        println!("MemoryService: Swapped in pid {} page {:#x} from swap slot {}", pid, virt, slot.number);
 
         // Free the swap slot
         swap.free_slot(slot.number);
@@ -705,19 +705,19 @@ impl StorageService {
     }
 
     /// Get swap statistics
-    pub fn swap_stats(&self) -> crate::services::storage::swap::SwapStats {
+    pub fn swap_stats(&self) -> crate::services::memory::swap::SwapStats {
         let swap = self.swap_manager.lock().unwrap();
         swap.stats()
     }
 
     /// Get page table statistics for all processes
-    pub fn page_table_stats(&self) -> Vec<(Pid, crate::services::storage::paging::PageTableStats)> {
+    pub fn page_table_stats(&self) -> Vec<(Pid, crate::services::memory::paging::PageTableStats)> {
         let page_tables = self.page_tables.lock().unwrap();
         page_tables.all_tables()
     }
 
     /// Get page table statistics for a specific process
-    pub fn process_page_table_stats(&self, pid: Pid) -> Option<crate::services::storage::paging::PageTableStats> {
+    pub fn process_page_table_stats(&self, pid: Pid) -> Option<crate::services::memory::paging::PageTableStats> {
         let page_tables = self.page_tables.lock().unwrap();
         page_tables.get_table(pid).and_then(|table| {
             table.lock().ok().map(|tbl| tbl.stats())
@@ -731,11 +731,11 @@ mod tests {
     use crate::messaging::LockedBus;
 
     #[test]
-    fn test_storage_service_creation() {
+    fn test_memory_service_creation() {
         let bus = Arc::new(LockedBus::new());
         let swap_config = SwapConfig::default();
 
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             1024 * 1024, // 1MB memory
             4096,           // 4KB frames
@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn test_alloc_frame() {
         let bus = Arc::new(LockedBus::new());
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             4096 * 100, // 100 frames
             4096,
@@ -773,7 +773,7 @@ mod tests {
     #[test]
     fn test_map_page() {
         let bus = Arc::new(LockedBus::new());
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             4096 * 100,
             4096,
@@ -795,7 +795,7 @@ mod tests {
     #[test]
     fn test_unmap_page() {
         let bus = Arc::new(LockedBus::new());
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             4096 * 100,
             4096,
@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn test_page_fault_handling() {
         let bus = Arc::new(LockedBus::new());
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             4096 * 10,  // Small memory to trigger swapping
             4096,
@@ -854,7 +854,7 @@ mod tests {
             device_path: "/test/swap".to_string(),
         };
 
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             4096 * 100,
             4096,
@@ -883,7 +883,7 @@ mod tests {
     #[test]
     fn test_memory_usage_stats() {
         let bus = Arc::new(LockedBus::new());
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             4096 * 1000,
             4096,
@@ -901,7 +901,7 @@ mod tests {
     #[test]
     fn test_all_process_stats() {
         let bus = Arc::new(LockedBus::new());
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             4096 * 1000,
             4096,
@@ -927,7 +927,7 @@ mod tests {
     #[test]
     fn test_free_frame() {
         let bus = Arc::new(LockedBus::new());
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             4096 * 100,
             4096,
@@ -947,7 +947,7 @@ mod tests {
     #[test]
     fn test_swap_disabled() {
         let bus = Arc::new(LockedBus::new());
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             4096 * 100,
             4096,
@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn test_multiple_process_page_tables() {
         let bus = Arc::new(LockedBus::new());
-        let service = StorageService::new(
+        let service = MemoryService::new(
             bus,
             4096 * 1000,
             4096,

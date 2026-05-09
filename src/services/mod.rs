@@ -4,6 +4,6 @@
 // Each service subscribes to the message bus and handles specific message types.
 
 pub mod process;
-pub mod storage;
+pub mod memory;
 pub mod file;
 pub mod device;

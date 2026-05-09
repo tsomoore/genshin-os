@@ -286,7 +286,7 @@ pub enum BlockReason {
     WaitingForChild { pid: Pid },
 }
 
-/// Memory and storage service requests
+/// Memory and memory service requests
 #[derive(Debug, Clone, PartialEq)]
 pub enum MemoryRequest {
     /// Allocate physical memory frame
