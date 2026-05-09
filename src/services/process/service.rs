@@ -1013,6 +1013,8 @@ impl ProcessService {
             }
         }
 
+        self.write_slice_virt(pid, 0, &prog);
+
 
         let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
         cpu.set_pc(0); cpu.set_sp(0xFFFF);
