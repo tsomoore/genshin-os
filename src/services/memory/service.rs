@@ -342,34 +342,9 @@ impl MemoryService {
     }
 
     fn handle_unmap_page(&self, pid: Pid, virt: VirtAddr) -> GenshinResult<()> {
-        let page_tables = Self::lock_mutex(&self.page_tables)?;
-
-        if let Some(table) = page_tables.get_table(pid) {
-            let mut table = Self::lock_mutex(&table)?;
-            match table.unmap(virt) {
-                Ok(_) => {
-                    println!("MemoryService: Unmapped {:#x} for pid {}", virt, pid);
-                    Ok(())
-                }
-                Err(PageError::NotMapped { vpn }) => {
-                    Err(GenshinError::Service(ServiceError::NotFound {
-                        resource_type: "Page mapping".to_string(),
-                        id: format!("VPN {}", vpn),
-                    }))
-                }
-                _ => {
-                    Err(GenshinError::Service(ServiceError::Other {
-                        code: 2,
-                        msg: "Page unmapping failed".to_string(),
-                    }))
-                }
-            }
-        } else {
-            Err(GenshinError::Service(ServiceError::NotFound {
-                resource_type: "Page table".to_string(),
-                id: pid.to_string(),
-            }))
-        }
+        self.mmu.unmap_page(pid, virt).map_err(|e| {
+            GenshinError::Service(ServiceError::Other { code: 2, msg: format!("{:?}", e) })
+        })
     }
 
     fn handle_map_page_with_response(&self, pid: Pid, virt: VirtAddr, phys: PhysAddr, prot: MemProt, envelope: &Envelope) -> GenshinResult<()> {
