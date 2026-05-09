@@ -11,6 +11,7 @@ pub mod hardware;
 pub mod services;
 pub mod ui;
 pub mod error;
+pub mod verbose;
 
 // Re-export core types for convenience
 pub use messaging::{
