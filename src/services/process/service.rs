@@ -1067,8 +1067,6 @@ impl ProcessService {
                 let s = String::from_utf8_lossy(&data);
                 println!("{}", s);
             },
-                println!("{}", s);
-            },
             10 => {
                 let flags = if r1 == 0 { OpenFlags::read_only() } else { OpenFlags::create() };
                 if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Open { path, flags })) {
