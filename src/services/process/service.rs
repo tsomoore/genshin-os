@@ -967,7 +967,6 @@ impl ProcessService {
                 println!("PS: '{}' done after {} instructions", executable, cpu.dump_state().instruction_count);
             }
             self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
-            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
         } else {
             let mut pcb = PCB::new(pid, executable.to_string(), None);
             pcb.args = args;
@@ -1033,7 +1032,6 @@ impl ProcessService {
             println!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
         }
         self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
-        self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
 
         let _ = envelope.respond_success(ResponseData::Void);
         Ok(())
