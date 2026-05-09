@@ -121,7 +121,7 @@ fn parse_line(line: &str, line_num: usize) -> Option<Vec<u8>> {
 
         "STORE" => {
             if parts.len() < 3 { eprintln!("  asm:{}: STORE requires [addr] and src", line_num); return None; }
-            let addr_str = parts[1];
+            let addr_str = parts[1].trim_end_matches(',');
             let src = reg_index(parts[2].trim_end_matches(','))?;
             let (addr_type, addr_val) = parse_mem_operand(addr_str)?;
             Some(encode(OP_STORE, src, addr_type, addr_val))
@@ -218,5 +218,22 @@ mod tests {
         let src = "; header\nMOV R0, #1\n\n; middle\nHALT\n";
         let code = assemble(src).unwrap();
         assert_eq!(code.len(), 2 * 8);
+    }
+
+    #[test]
+    fn test_load_store() {
+        let src = "MOV R0, #72\nSTORE [0x200], R0\nLOAD R1, [0x200]\nHALT\n";
+        let code = assemble(src).unwrap();
+        assert_eq!(code.len(), 4 * 8);
+        // STORE [0x200], R0 (op=0x07, src=R0, addr_type=IMM, addr_val=0x200)
+        assert_eq!(code[8], OP_STORE);
+        assert_eq!(code[9], 0); // R0
+        assert_eq!(code[10], SRC_IMM);
+        assert_eq!(u32::from_le_bytes([code[12],code[13],code[14],code[15]]), 0x200);
+        // LOAD R1, [0x200] (op=0x06, dst=R1, addr_type=IMM, addr_val=0x200)
+        assert_eq!(code[16], OP_LOAD);
+        assert_eq!(code[17], 1); // R1
+        assert_eq!(code[18], SRC_IMM);
+        assert_eq!(u32::from_le_bytes([code[20],code[21],code[22],code[23]]), 0x200);
     }
 }
