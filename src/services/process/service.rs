@@ -942,7 +942,7 @@ impl ProcessService {
         let pid = *next_pid; *next_pid += 1; drop(next_pid);
 
         if let Some(code) = self.load_program(executable) {
-            let base = (pid as u64) * 0x40000;
+            let base = self.alloc_frame()?;
             use crate::hardware::VirtualCPU;
             // Map page
             let _ = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
@@ -967,6 +967,7 @@ impl ProcessService {
                 println!("PS: '{}' done after {} instructions", executable, cpu.dump_state().instruction_count);
             }
             self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
+            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
         } else {
             let mut pcb = PCB::new(pid, executable.to_string(), None);
             pcb.args = args;
@@ -981,7 +982,7 @@ impl ProcessService {
     fn handle_spawn(&self, program: String, params: Vec<u8>, envelope: &Envelope) -> GenshinResult<()> {
         use crate::hardware::{PageFlags, VirtualCPU};
         let pid = { let mut n = self.next_pid.lock().unwrap(); let p = *n; *n += 1; p };
-        let base = (pid as u64) * 0x40000;
+        let base = self.alloc_frame()?;
 
         // Map page
         // Request page mapping from MemoryService and WAIT for completion
@@ -1032,6 +1033,7 @@ impl ProcessService {
             println!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
         }
         self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
+        self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
 
         let _ = envelope.respond_success(ResponseData::Void);
         Ok(())
@@ -1050,6 +1052,20 @@ impl ProcessService {
             "write" => [&mov(1, 1)[..], &mov(0, 10)[..], &int[..], &mov(0, 13)[..], &mov(2, data_len as u8)[..], &int[..], &mov(0, 11)[..], &int[..], &halt[..]].concat(),
             "stat" => [&mov(0, 17)[..], &int[..], &halt[..]].concat(),
             _ => vec![0xFF,0x00,0x00,0x00, 0x00,0x00,0x00,0x00],
+        }
+    }
+
+    fn alloc_frame(&self) -> GenshinResult<u64> {
+        let rx = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame { count: 1 }))
+            .map_err(|_| GenshinError::Service(ServiceError::Other { code: 90, msg: "AllocFrame failed".into() }))?;
+        let resp = rx.recv_timeout(std::time::Duration::from_secs(2))
+            .map_err(|_| GenshinError::Service(ServiceError::Other { code: 91, msg: "AllocFrame timeout".into() }))?;
+        if let Some(ResponseData::PhysicalAddr(addr)) = resp.data() {
+            Ok(*addr)
+        } else {
+            Err(GenshinError::Service(ServiceError::ResourceExhausted {
+                resource: "memory".into(), available: 0, requested: 1,
+            }))
         }
     }
 
