@@ -948,11 +948,13 @@ impl ProcessService {
         let base = (pid as u64) * 0x40000;
 
         // Map page
-        // Request page mapping from MemoryService
-        let _ = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
+        // Request page mapping from MemoryService and WAIT for completion
+        if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
             pid, virt: 0, phys: base,
             prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
-        }));
+        })) {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
+        }
 
         // Write params
         if !params.is_empty() {
