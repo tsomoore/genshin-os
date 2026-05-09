@@ -987,6 +987,12 @@ impl ProcessService {
             }
         }
         println!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
+
+        // Cleanup: release memory back to MemoryService
+        self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
+        self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
+        println!("PS: Freed PID {} memory (base={:#x})", pid, base);
+
         let _ = envelope.respond_success(ResponseData::Void);
         Ok(())
     }
