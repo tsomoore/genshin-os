@@ -393,46 +393,16 @@ impl MemoryService {
     }
 
     fn handle_unmap_page_with_response(&self, pid: Pid, virt: VirtAddr, envelope: &Envelope) -> GenshinResult<()> {
-        let page_tables = Self::lock_mutex(&self.page_tables)?;
-
-        if let Some(table) = page_tables.get_table(pid) {
-            let mut table = Self::lock_mutex(&table)?;
-            match table.unmap(virt) {
-                Ok(_) => {
-                    println!("MemoryService: Unmapped {:#x} for pid {}", virt, pid);
-                    let _ = envelope.respond_success(ResponseData::Void);
-                    Ok(())
-                }
-                Err(PageError::NotMapped { vpn }) => {
-                    envelope.respond_error(MessagingServiceError::NotFound {
-                        resource: "Page mapping".to_string(),
-                        id: format!("VPN {}", vpn),
-                    })?;
-                    Err(GenshinError::Service(ServiceError::NotFound {
-                        resource_type: "Page mapping".to_string(),
-                        id: format!("VPN {}", vpn),
-                    }))
-                }
-                _ => {
-                    envelope.respond_error(MessagingServiceError::Other {
-                        code: 2,
-                        msg: "Page unmapping failed".to_string(),
-                    })?;
-                    Err(GenshinError::Service(ServiceError::Other {
-                        code: 2,
-                        msg: "Page unmapping failed".to_string(),
-                    }))
-                }
+        match self.mmu.unmap_page(pid, virt) {
+            Ok(_) => {
+                println!("MemoryService: Unmapped {:#x} for pid {}", virt, pid);
+                let _ = envelope.respond_success(ResponseData::Void);
+                Ok(())
             }
-        } else {
-            envelope.respond_error(MessagingServiceError::NotFound {
-                resource: "Page table".to_string(),
-                id: pid.to_string(),
-            })?;
-            Err(GenshinError::Service(ServiceError::NotFound {
-                resource_type: "Page table".to_string(),
-                id: pid.to_string(),
-            }))
+            Err(e) => {
+                let _ = envelope.respond_error(MessagingServiceError::Other { code: 2, msg: format!("{:?}", e) });
+                Err(GenshinError::Service(ServiceError::Other { code: 2, msg: format!("{:?}", e) }))
+            }
         }
     }
 
