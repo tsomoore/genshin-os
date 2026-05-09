@@ -948,7 +948,11 @@ impl ProcessService {
         let base = (pid as u64) * 0x40000;
 
         // Map page
-        self._mmu.map_page(pid, 0, base, PageFlags { present: true, writable: true, user_accessible: true }).ok();
+        // Request page mapping from StorageService
+        let _ = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
+            pid, virt: 0, phys: base,
+            prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
+        }));
 
         // Write params
         if !params.is_empty() {

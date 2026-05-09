@@ -2,6 +2,7 @@
 
 use genshin_os::{Shell, LockedBus};
 use genshin_os::services::process::ProcessService;
+use genshin_os::services::storage::StorageService;
 use genshin_os::services::file::FileService;
 use genshin_os::hardware::{PhysicalMemory, MMU};
 use std::sync::Arc;
@@ -25,6 +26,15 @@ fn main() {
         service.run();
     });
     println!("\u{2713} Process service (with VirtualCPU)");
+
+    let storage_bus = bus.clone();
+    let storage_mem = hw_memory.clone();
+    let storage_mmu = mmu.clone();
+    let _storage_handle = thread::spawn(move || {
+        let service = StorageService::new(storage_bus, storage_mem, storage_mmu);
+        service.run();
+    });
+    println!("\u{2713} Storage service");
 
     let file_bus = bus.clone();
     let _file_handle = thread::spawn(move || {

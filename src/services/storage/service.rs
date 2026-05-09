@@ -13,7 +13,7 @@ use crate::messaging::{
 };
 use crate::messaging::bus::Envelope;
 use crate::{GenshinError, GenshinResult, ServiceError};
-use crate::hardware::PhysicalMemory;
+use crate::hardware::{PhysicalMemory, MMU};
 
 // Import storage service components
 use super::memory::{FrameAllocator, Frame, PhysicalMemoryManager, MemoryUsage};
@@ -43,6 +43,7 @@ pub struct StorageService {
 
     /// Hardware memory reference
     hardware_memory: Arc<Mutex<PhysicalMemory>>,
+    mmu: Arc<MMU>,
 }
 
 impl StorageService {
@@ -57,39 +58,14 @@ impl StorageService {
     }
 
     /// Create a new storage service
-    pub fn new(
-        bus: Arc<dyn MessageBus>,
-        memory_size: usize,
-        frame_size: usize,
-        page_size: usize,
-        pages_per_process: usize,
-        swap_config: SwapConfig,
-    ) -> Self {
+    pub fn new(bus: Arc<dyn MessageBus>, hw: PhysicalMemory, mmu: Arc<MMU>) -> Self {
         let receiver = bus.subscribe();
-
-        let memory_manager = Arc::new(Mutex::new(PhysicalMemoryManager::new(
-            memory_size,
-            frame_size,
-        )));
-
-        let page_tables = Arc::new(Mutex::new(PageTableManager::new(
-            page_size,
-            pages_per_process,
-        )));
-
-        let swap_manager = Arc::new(Mutex::new(SwapManager::new(swap_config)));
-
-        // Get hardware memory reference (this would be passed in)
-        let hardware_memory = Arc::new(Mutex::new(PhysicalMemory::new(memory_size)));
-
-        Self {
-            bus,
-            receiver,
-            memory_manager,
-            page_tables,
-            swap_manager,
-            hardware_memory,
-        }
+        let size = hw.size();
+        let memory_manager = Arc::new(Mutex::new(PhysicalMemoryManager::new(size, 4096)));
+        let page_tables = Arc::new(Mutex::new(PageTableManager::new(4096, 256)));
+        let swap_manager = Arc::new(Mutex::new(SwapManager::new(SwapConfig::default())));
+        let hardware_memory = Arc::new(Mutex::new(hw));
+        Self { bus, receiver, memory_manager, page_tables, swap_manager, hardware_memory, mmu }
     }
 
     /// Run the storage service (main loop)
@@ -396,46 +372,21 @@ impl StorageService {
     }
 
     fn handle_map_page_with_response(&self, pid: Pid, virt: VirtAddr, phys: PhysAddr, prot: MemProt, envelope: &Envelope) -> GenshinResult<()> {
-        let page_tables = Self::lock_mutex(&self.page_tables)?;
-
-        // Get or create page table for process
-        let table = if let Some(table) = page_tables.get_table(pid) {
-            table
-        } else {
-            drop(page_tables);
-            let mut page_tables = Self::lock_mutex(&self.page_tables)?;
-            let table = page_tables.create_table(pid);
-            drop(page_tables);
-            table
+        use crate::hardware::PageFlags;
+        let flags = PageFlags {
+            present: true,
+            writable: prot.writable,
+            user_accessible: true,
         };
-
-        let mut table = Self::lock_mutex(&table)?;
-        let result = table.map(virt, phys, prot);
-
-        match result {
+        match self.mmu.map_page(pid, virt, phys, flags) {
             Ok(_) => {
                 println!("StorageService: Mapped {:#x} -> {:#x} for pid {}", virt, phys, pid);
                 let _ = envelope.respond_success(ResponseData::Void);
                 Ok(())
             }
-            Err(PageError::AlreadyMapped { vpn }) => {
-                envelope.respond_error(MessagingServiceError::InvalidArguments {
-                    msg: format!("VPN {} already mapped", vpn),
-                })?;
-                Err(GenshinError::Service(ServiceError::InvalidArguments {
-                    param: "virtual_address".to_string(),
-                    reason: format!("VPN {} already mapped", vpn),
-                }))
-            }
-            _ => {
-                envelope.respond_error(MessagingServiceError::Other {
-                    code: 1,
-                    msg: "Page mapping failed".to_string(),
-                })?;
-                Err(GenshinError::Service(ServiceError::Other {
-                    code: 1,
-                    msg: "Page mapping failed".to_string(),
-                }))
+            Err(e) => {
+                let _ = envelope.respond_error(MessagingServiceError::Other { code: 1, msg: format!("{:?}", e) });
+                Err(GenshinError::Service(ServiceError::Other { code: 1, msg: format!("{:?}", e) }))
             }
         }
     }
