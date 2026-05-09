@@ -1061,6 +1061,13 @@ impl ProcessService {
         use crate::messaging::{FileRequest, OpenFlags, ResponseData};
         match r0 {
             0 => cpu.halt(),
+            1 => println!("[PRINT] {}", r1 as i64),
+            2 => {
+                let s = String::from_utf8_lossy(&self.read_bytes_virt(pid, r1, r2 as usize));
+                println!("{}", s);
+            },
+                println!("{}", s);
+            },
             10 => {
                 let flags = if r1 == 0 { OpenFlags::read_only() } else { OpenFlags::create() };
                 if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Open { path, flags })) {
