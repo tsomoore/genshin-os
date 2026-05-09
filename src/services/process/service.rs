@@ -943,13 +943,16 @@ impl ProcessService {
         let pid = *next_pid; *next_pid += 1; drop(next_pid);
 
         if let Some(code) = self.load_program(executable) {
-            let base = self.alloc_frame()?;
+            let frame_count = (code.len() + 4095) / 4096;
+            let frames = self.alloc_frames(frame_count)?;
+            let base = frames[0];
             use crate::hardware::VirtualCPU;
-            // Map page
-            if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
-                pid, virt: 0, phys: base,
-                prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
-            })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
+            for (i, &addr) in frames.iter().enumerate() {
+                if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
+                    pid, virt: (i * 4096) as u64, phys: addr,
+                    prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
+                })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
+            }
             self.write_slice_virt(pid, 0, &code);
             let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
             cpu.set_pc(0); cpu.set_sp(0xFFFF);
@@ -983,15 +986,19 @@ impl ProcessService {
     fn handle_spawn(&self, program: String, params: Vec<u8>, envelope: &Envelope) -> GenshinResult<()> {
         use crate::hardware::{PageFlags, VirtualCPU};
         let pid = { let mut n = self.next_pid.lock().unwrap(); let p = *n; *n += 1; p };
-        let base = self.alloc_frame()?;
 
-        // Map page
-        // Request page mapping from MemoryService and WAIT for completion
-        if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
-            pid, virt: 0, phys: base,
-            prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
-        })) {
-            let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
+        let p_len = params.len();
+        let prog = self.gen_builtin_program(&program, p_len);
+        let total = prog.len() + params.len() + 0x200;
+        let frame_count = (total + 4095) / 4096;
+        let frames = self.alloc_frames(frame_count)?;
+        let base = frames[0];
+
+        for (i, &addr) in frames.iter().enumerate() {
+            if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
+                pid, virt: (i * 4096) as u64, phys: addr,
+                prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
+            })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
         }
 
         // Write params
@@ -1006,8 +1013,6 @@ impl ProcessService {
             }
         }
 
-        let prog = self.gen_builtin_program(&program, params.len());
-        self.write_slice_virt(pid, 0, &prog);
 
         let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
         cpu.set_pc(0); cpu.set_sp(0xFFFF);
@@ -1056,16 +1061,17 @@ impl ProcessService {
         }
     }
 
-    fn alloc_frame(&self) -> GenshinResult<u64> {
-        let rx = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame { count: 1 }))
+    fn alloc_frames(&self, count: usize) -> GenshinResult<Vec<u64>> {
+        let rx = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame { count }))
             .map_err(|_| GenshinError::Service(ServiceError::Other { code: 90, msg: "AllocFrame failed".into() }))?;
         let resp = rx.recv_timeout(std::time::Duration::from_secs(2))
             .map_err(|_| GenshinError::Service(ServiceError::Other { code: 91, msg: "AllocFrame timeout".into() }))?;
         if let Some(ResponseData::PhysicalAddr(addr)) = resp.data() {
-            Ok(*addr)
+            let start = *addr;
+            Ok((0..count as u64).map(|i| start + i * 4096).collect())
         } else {
             Err(GenshinError::Service(ServiceError::ResourceExhausted {
-                resource: "memory".into(), available: 0, requested: 1,
+                resource: "memory".into(), available: 0, requested: count,
             }))
         }
     }
