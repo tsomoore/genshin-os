@@ -56,6 +56,7 @@ pub struct ProcessService {
     parent_children: Arc<Mutex<HashMap<Pid, Vec<Pid>>>>,
     _hw: crate::hardware::PhysicalMemory,
     _mmu: Arc<crate::hardware::MMU>,
+    cpus: Arc<Mutex<HashMap<Pid, crate::hardware::VirtualCPU>>>,
 }
 
 impl std::fmt::Debug for ProcessService {
@@ -79,6 +80,7 @@ impl ProcessService {
             scheduler: Arc::new(Mutex::new(Scheduler::round_robin(10))),
             parent_children: Arc::new(Mutex::new(HashMap::new())),
             _hw: hw, _mmu: mmu,
+            cpus: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -449,19 +451,31 @@ impl ProcessService {
     fn handle_timer_interrupt(&self) -> GenshinResult<()> {
         let mut scheduler = Self::lock_mutex(&self.scheduler)?;
         let decision = scheduler.schedule();
+        drop(scheduler);
 
-        match decision {
-            SchedulingDecision::Run { pid, tid } => {
-                println!("ProcessService: Timer tick - scheduling {}:{}", pid, tid);
-            }
-            SchedulingDecision::Idle => {
-                // No process to run
-            }
-            SchedulingDecision::Halt => {
-                println!("ProcessService: All processes terminated");
+        if let SchedulingDecision::Run { pid, .. } = decision {
+            let mut cpus = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?;
+            if let Some(cpu) = cpus.get_mut(&pid) {
+                if !cpu.is_halted() {
+                    for _ in 0..3 {
+                        if cpu.is_halted() { break; }
+                        if cpu.step().is_err() { cpu.halt(); break; }
+                        while let Ok(env) = self.receiver.try_recv() {
+                            if let KernelMsg::Interrupt(crate::messaging::Interrupt::SyscallTrap) = &env.message {
+                                let st = cpu.dump_state();
+                                self.handle_file_syscall(cpu, st.registers[0], st.registers[1], st.registers[2]);
+                                if cpu.is_halted() { break; }
+                            }
+                        }
+                    }
+                    let s = cpu.dump_state();
+                    println!("CPU[{}]: PC={:#06x} R0={} R1={} R2={} R3={} | IC={} {}",
+                        pid, s.pc, s.registers[0] as i64, s.registers[1] as i64,
+                        s.registers[2] as i64, s.registers[3] as i64,
+                        s.instruction_count, if cpu.is_halted() { "[HALTED]" } else { "" });
+                }
             }
         }
-
         Ok(())
     }
 
@@ -975,23 +989,28 @@ impl ProcessService {
         cpu.set_pc(0); cpu.set_sp(0xFFFF);
         println!("PS: Spawn '{}' (PID {}, {} bytes)", program, pid, prog.len());
 
-        loop {
-            if cpu.is_halted() { break; }
-            if cpu.step().is_err() { cpu.halt(); break; }
-            while let Ok(env) = self.receiver.try_recv() {
-                if let KernelMsg::Interrupt(crate::messaging::Interrupt::SyscallTrap) = &env.message {
-                    let st = cpu.dump_state();
-                    self.handle_file_syscall(&mut cpu, st.registers[0], st.registers[1], st.registers[2]);
-                    if cpu.is_halted() { break; }
-                }
-            }
+        // Submit to scheduler, drive via timer (no direct CPU loop)
+        {
+            let mut c = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?;
+            c.insert(pid, cpu);
         }
-        println!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
+        let mut pcb = crate::services::process::PCB::new(pid, program.clone(), None);
+        pcb.state = ProcessState::Ready;
+        self.process_table.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 61, msg: "table".into() }))?
+            .insert(pid, Arc::new(Mutex::new(pcb)));
+        self.handle_schedule(pid, 1)?;
 
-        // Cleanup: release memory back to MemoryService
+        for _ in 0..100 {
+            if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() { break; } } else { break; }
+            let _ = self.handle_timer_interrupt();
+        }
+
+        let mut cpus = self.cpus.lock().unwrap();
+        if let Some(cpu) = cpus.remove(&pid) {
+            println!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
+        }
         self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
         self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
-        println!("PS: Freed PID {} memory (base={:#x})", pid, base);
 
         let _ = envelope.respond_success(ResponseData::Void);
         Ok(())
