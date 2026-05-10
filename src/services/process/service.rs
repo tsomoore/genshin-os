@@ -461,13 +461,27 @@ impl ProcessService {
                     for _ in 0..3 {
                         if cpu.is_halted() { break; }
                         if cpu.step().is_err() { cpu.halt(); break; }
-                        while let Ok(env) = self.intr_rx.try_recv() {
-                            if let KernelMsg::Interrupt(crate::messaging::Interrupt::SyscallTrap) = &env.message {
-                                let st = cpu.dump_state();
-                                self.handle_file_syscall(cpu, st.registers[0], st.registers[1], st.registers[2]);
-                                if cpu.is_halted() { break; }
+                        // Retry: Kernel may not have forwarded the interrupt yet
+                        for _ in 0..20 {
+                            while let Ok(env) = self.intr_rx.try_recv() {
+                                if let KernelMsg::Interrupt(int) = &env.message {
+                                    match int {
+                                        crate::messaging::Interrupt::SyscallTrap => {
+                                            let st = cpu.dump_state();
+                                            self.handle_file_syscall(cpu, st.registers[0], st.registers[1], st.registers[2]);
+                                            if cpu.is_halted() { break; }
+                                        }
+                                        crate::messaging::Interrupt::PageFault { .. } => {
+                                            cpu.pagefault_pending = false;
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
-                        }
+                            if cpu.pagefault_pending { break; }
+                            // Small yield to let Kernel thread run
+                            std::thread::yield_now();
+                    }
                     }
                     let s = cpu.dump_state();
                     vprintln!("CPU[{}]: PC={:#06x} R0={} R1={} R2={} R3={} | IC={} {}",
