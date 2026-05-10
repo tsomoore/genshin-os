@@ -480,7 +480,7 @@ impl ProcessService {
                             }
                             if cpu.pagefault_pending { break; }
                             // Small yield to let Kernel thread run
-                            std::thread::yield_now();
+                            std::thread::sleep(std::time::Duration::from_micros(50));
                     }
                     }
                     let s = cpu.dump_state();
