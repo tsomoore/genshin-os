@@ -1,6 +1,7 @@
 // Genshin-OS Main Entry Point
 
 use genshin_os::hardware::{MMU, PhysicalMemory};
+use genshin_os::services::device::DeviceService;
 use genshin_os::services::file::FileService;
 use genshin_os::services::kernel::Kernel;
 use genshin_os::services::memory::MemoryService;
@@ -50,6 +51,14 @@ fn main() {
         service.run();
     });
     println!("\u{2713} File service");
+
+    // DeviceService — subscribes directly to bus (handles Device messages)
+    let device_bus = bus.clone();
+    let _device_handle = thread::spawn(move || {
+        let service = DeviceService::new(device_bus);
+        service.run();
+    });
+    println!("\u{2713} Device service");
 
     let mut shell = Shell::new(bus);
     println!("\u{2713} Shell\n");

@@ -567,6 +567,10 @@ pub enum DeviceRequest {
 
     /// Get device configuration
     GetConfig { device_id: u32 },
+
+    // ========== Clipboard ==========
+    ClipboardSet { data: Vec<u8> },
+    ClipboardGet { max_size: usize },
 }
 
 /// Device class/category
@@ -577,6 +581,7 @@ pub enum DeviceClass {
     Network,
     Timer,
     Graphics,
+    Clipboard,
     Unknown,
 }
 

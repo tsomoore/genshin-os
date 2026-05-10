@@ -35,6 +35,9 @@ pub enum DeviceType {
     /// Input device
     Input,
 
+    /// Clipboard device
+    Clipboard,
+
     /// Unknown device type
     Unknown,
 }

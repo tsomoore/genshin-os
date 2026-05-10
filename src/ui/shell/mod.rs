@@ -236,6 +236,27 @@ impl Shell {
                 let _ = self.send_and_wait(msg)?;
                 Ok(())
             }
+            "copy" => {
+                let text = command.args.join(" ");
+                let msg = KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardSet {
+                    data: text.as_bytes().to_vec(),
+                });
+                self.context.send(msg);
+                println!("Copied: {}", text);
+                Ok(())
+            }
+            "paste" => {
+                let msg = KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardGet { max_size: 4096 });
+                match self.send_and_wait(msg) {
+                    Ok(resp) => {
+                        if let Some(ResponseData::Bytes(data)) = resp.data() {
+                            println!("{}", String::from_utf8_lossy(data));
+                        }
+                    }
+                    Err(e) => eprintln!("paste: {}", e),
+                }
+                Ok(())
+            }
             "disk" => {
                 let msg = KernelMsg::File(crate::messaging::FileRequest::DiskInfo);
                 match self.send_and_wait(msg) {

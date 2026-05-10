@@ -32,6 +32,9 @@ pub struct DeviceService {
 
     /// Device manager
     device_manager: Arc<Mutex<DeviceManager>>,
+
+    /// Clipboard buffer
+    clipboard: Arc<Mutex<String>>,
 }
 
 impl DeviceService {
@@ -44,6 +47,7 @@ impl DeviceService {
             bus,
             receiver,
             device_manager,
+            clipboard: Arc::new(Mutex::new(String::new())),
         }
     }
 
@@ -116,6 +120,18 @@ impl DeviceService {
     /// Handle device service request with response
     fn handle_device_request_with_response(&self, req: DeviceRequest, envelope: &Envelope) -> GenshinResult<()> {
         match req {
+            // ========== Clipboard ==========
+            DeviceRequest::ClipboardSet { data } => {
+                self.clipboard.lock().unwrap().clear();
+                self.clipboard.lock().unwrap().push_str(&String::from_utf8_lossy(&data));
+                let _ = envelope.respond_success(ResponseData::Void);
+            }
+            DeviceRequest::ClipboardGet { max_size } => {
+                let clip = self.clipboard.lock().unwrap();
+                let data = clip.as_bytes();
+                let len = std::cmp::min(max_size, data.len());
+                let _ = envelope.respond_success(ResponseData::Bytes(data[..len].to_vec()));
+            }
             // ========== Device Management ==========
             DeviceRequest::RegisterDevice { device_type, name } => {
                 self.handle_register_device_with_response(device_type, name, envelope)?;
@@ -155,6 +171,12 @@ impl DeviceService {
     /// Handle device service request
     fn handle_device_request(&self, req: DeviceRequest) -> GenshinResult<()> {
         match req {
+            // ========== Clipboard ==========
+            DeviceRequest::ClipboardSet { data } => {
+                self.clipboard.lock().unwrap().clear();
+                self.clipboard.lock().unwrap().push_str(&String::from_utf8_lossy(&data));
+            }
+            DeviceRequest::ClipboardGet { .. } => {} // handled in _with_response
             // ========== Device Management ==========
             DeviceRequest::RegisterDevice { device_type, name } => {
                 self.handle_register_device(device_type, name)?;
@@ -485,6 +507,7 @@ impl DeviceService {
             DeviceClass::Char => Ok(DeviceType::Character),
             DeviceClass::Network => Ok(DeviceType::Network),
             DeviceClass::Graphics => Ok(DeviceType::Graphics),
+            DeviceClass::Clipboard => Ok(DeviceType::Clipboard),
             DeviceClass::Timer => Ok(DeviceType::Unknown),
             DeviceClass::Unknown => Ok(DeviceType::Unknown),
         }
