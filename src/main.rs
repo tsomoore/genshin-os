@@ -1,11 +1,11 @@
 // Genshin-OS Main Entry Point
 
-use genshin_os::{Shell, LockedBus};
-use genshin_os::services::kernel::Kernel;
-use genshin_os::services::process::ProcessService;
+use genshin_os::hardware::{MMU, PhysicalMemory};
 use genshin_os::services::file::FileService;
+use genshin_os::services::kernel::Kernel;
 use genshin_os::services::memory::MemoryService;
-use genshin_os::hardware::{PhysicalMemory, MMU};
+use genshin_os::services::process::ProcessService;
+use genshin_os::{LockedBus, Shell};
 use std::sync::Arc;
 use std::thread;
 
@@ -19,7 +19,9 @@ fn main() {
 
     // Kernel owns the bus subscription, creates service channels
     let (kernel, prx, irx, mrx, frx) = Kernel::new(bus.clone());
-    let kernel_handle = thread::spawn(move || { kernel.run(); });
+    let kernel_handle = thread::spawn(move || {
+        kernel.run();
+    });
     println!("\u{2713} Kernel");
 
     // ProcessService — receives from kernel channel

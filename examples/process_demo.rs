@@ -13,11 +13,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use genshin_os::{
-    KernelMsg, LockedBus, MessageBus,
-    Syscall, ProcessRequest, IPCMessage, SignalType, MemProt, Interrupt,
-};
 use genshin_os::services::process::ProcessService;
+use genshin_os::{
+    IPCMessage, Interrupt, KernelMsg, LockedBus, MemProt, MessageBus, ProcessRequest, SignalType,
+    Syscall,
+};
 
 fn section(title: &str) {
     println!("\n{}", "=".repeat(60));
@@ -106,7 +106,9 @@ fn main() {
     let msg_send = KernelMsg::Process(ProcessRequest::SendMessage {
         from_pid: 1,
         to_pid: 2,
-        msg: IPCMessage::Text { data: "Hello from PID 1!".to_string() },
+        msg: IPCMessage::Text {
+            data: "Hello from PID 1!".to_string(),
+        },
     });
     bus.send(msg_send).unwrap();
     println!("   📤 发送: SendMessage(from=1, to=2, \"Hello from PID 1!\")");
@@ -135,19 +137,15 @@ fn main() {
     wait();
     println!("   ✅ 共享内存区域 shmid=1 已创建");
 
-    let msg_shm_attach = KernelMsg::Process(ProcessRequest::AttachSharedMemory {
-        pid: 2,
-        shmid: 1,
-    });
+    let msg_shm_attach =
+        KernelMsg::Process(ProcessRequest::AttachSharedMemory { pid: 2, shmid: 1 });
     bus.send(msg_shm_attach).unwrap();
     println!("   📤 发送: AttachSharedMemory(pid=2, shmid=1)");
     wait();
     println!("   ✅ PID=2 已附加到共享内存 shmid=1");
 
-    let msg_shm_detach = KernelMsg::Process(ProcessRequest::DetachSharedMemory {
-        pid: 2,
-        shmid: 1,
-    });
+    let msg_shm_detach =
+        KernelMsg::Process(ProcessRequest::DetachSharedMemory { pid: 2, shmid: 1 });
     bus.send(msg_shm_detach).unwrap();
     println!("   📤 发送: DetachSharedMemory(pid=2, shmid=1)");
     wait();
@@ -164,19 +162,13 @@ fn main() {
     wait();
     println!("   ✅ 信号量 semid=1 已创建，初始值=2");
 
-    let msg_sem_wait = KernelMsg::Process(ProcessRequest::WaitSemaphore {
-        pid: 2,
-        semid: 1,
-    });
+    let msg_sem_wait = KernelMsg::Process(ProcessRequest::WaitSemaphore { pid: 2, semid: 1 });
     bus.send(msg_sem_wait).unwrap();
     println!("   📤 发送: WaitSemaphore(pid=2, semid=1)  — P 操作");
     wait();
     println!("   ✅ PID=2 获取信号量（Atomic CAS 操作）");
 
-    let msg_sem_signal = KernelMsg::Process(ProcessRequest::SignalSemaphore {
-        pid: 2,
-        semid: 1,
-    });
+    let msg_sem_signal = KernelMsg::Process(ProcessRequest::SignalSemaphore { pid: 2, semid: 1 });
     bus.send(msg_sem_signal).unwrap();
     println!("   📤 发送: SignalSemaphore(pid=2, semid=1)  — V 操作");
     wait();
@@ -190,19 +182,13 @@ fn main() {
     wait();
     println!("   ✅ 互斥锁 lock_id=1 已创建");
 
-    let msg_lock_acquire = KernelMsg::Process(ProcessRequest::AcquireLock {
-        pid: 1,
-        lock_id: 1,
-    });
+    let msg_lock_acquire = KernelMsg::Process(ProcessRequest::AcquireLock { pid: 1, lock_id: 1 });
     bus.send(msg_lock_acquire).unwrap();
     println!("   📤 发送: AcquireLock(pid=1, lock_id=1)");
     wait();
     println!("   ✅ PID=1 获取锁（owner=PID 1, count=1）");
 
-    let msg_lock_release = KernelMsg::Process(ProcessRequest::ReleaseLock {
-        pid: 1,
-        lock_id: 1,
-    });
+    let msg_lock_release = KernelMsg::Process(ProcessRequest::ReleaseLock { pid: 1, lock_id: 1 });
     bus.send(msg_lock_release).unwrap();
     println!("   📤 发送: ReleaseLock(pid=1, lock_id=1)");
     wait();

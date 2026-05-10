@@ -3,22 +3,39 @@
 // 演示 genshin-OS 中块设备和设备管理器的使用
 
 use genshin_os::{
-    // 块设备相关
-    VirtualDisk, PhysicalBlockDevice, PartitionDevice,
-    BlockDevice, Partition, PartitionType, PartitionLayout,
-    DISK_SECTOR_SIZE, DISK_BLOCK_SIZE,
+    BlockDevice,
+    DISK_BLOCK_SIZE,
 
+    DISK_SECTOR_SIZE,
     // 设备管理相关
-    Device, DeviceType, DeviceStatus, DeviceRegistry,
-    KeyboardDevice, SerialDevice, NetworkDevice,
+    Device,
+    DeviceClass,
 
-    // 消息总线
-    KernelMsg, MessageBus, LockedBus,
-    FileRequest, FileSystemType, SeekWhence,
-    DeviceRequest, DeviceClass,
-
+    DeviceRegistry,
+    DeviceRequest,
+    DeviceStatus,
+    DeviceType,
+    FileRequest,
+    FileSystemType,
+    GenshinError,
     // 其他
-    GenshinResult, GenshinError,
+    GenshinResult,
+    // 消息总线
+    KernelMsg,
+    KeyboardDevice,
+    LockedBus,
+    MessageBus,
+    NetworkDevice,
+
+    Partition,
+    PartitionDevice,
+    PartitionLayout,
+    PartitionType,
+    PhysicalBlockDevice,
+    SeekWhence,
+    SerialDevice,
+    // 块设备相关
+    VirtualDisk,
 };
 
 use std::sync::Arc;
@@ -63,8 +80,11 @@ fn main() -> GenshinResult<()> {
 /// 演示块设备的基本使用
 fn demo_block_devices() -> GenshinResult<()> {
     // 创建虚拟磁盘
-    let disk = Arc::new(VirtualDisk::new(1024));  // 1024 扇区
-    println!("   ✓ 创建虚拟磁盘: 1024 扇区 ({} KB)", 1024 * DISK_SECTOR_SIZE / 1024);
+    let disk = Arc::new(VirtualDisk::new(1024)); // 1024 扇区
+    println!(
+        "   ✓ 创建虚拟磁盘: 1024 扇区 ({} KB)",
+        1024 * DISK_SECTOR_SIZE / 1024
+    );
 
     // 创建块设备
     let block_device = PhysicalBlockDevice::new(disk, "sda".to_string());
@@ -172,7 +192,7 @@ fn demo_device_manager() -> GenshinResult<()> {
     // 注册网卡
     let nic = Arc::new(std::sync::Mutex::new(NetworkDevice::new(
         3,
-        [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]
+        [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
     )));
     let nic_id = registry.register_device(nic);
     println!("   ✓ 注册网卡设备 (ID: {}, MAC: 52:54:00:12:34:56)", nic_id);
@@ -181,7 +201,10 @@ fn demo_device_manager() -> GenshinResult<()> {
     let devices = registry.list_devices();
     println!("   ✓ 总设备数: {}", devices.len());
     for device in devices {
-        println!("     - {}: {:?} ({:?})", device.name, device.device_type, device.status);
+        println!(
+            "     - {}: {:?} ({:?})",
+            device.name, device.device_type, device.status
+        );
     }
 
     // 按类型查询

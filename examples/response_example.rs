@@ -3,9 +3,8 @@
 // 演示如何使用 genshin-OS 的请求-响应机制
 
 use genshin_os::{
-    KernelMsg, ProcessRequest, MemoryRequest,
-    MessageBus, LockedBus,
-    RequestWithResponse, Response, ResponseData, ServiceError,
+    KernelMsg, LockedBus, MemoryRequest, MessageBus, ProcessRequest, RequestWithResponse, Response,
+    ResponseData, ServiceError,
 };
 use std::sync::Arc;
 use std::thread;
@@ -36,10 +35,7 @@ fn main() {
 /// 示例 1: Fire-and-forget 模式
 fn fire_and_forget_example(bus: &Arc<LockedBus>) {
     // 发送消息，不等待响应
-    let msg = KernelMsg::Process(ProcessRequest::Schedule {
-        pid: 1,
-        tid: 1,
-    });
+    let msg = KernelMsg::Process(ProcessRequest::Schedule { pid: 1, tid: 1 });
 
     match bus.send(msg) {
         Ok(_) => println!("   ✓ 消息已发送（fire-and-forget）"),

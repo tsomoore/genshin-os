@@ -7,10 +7,7 @@
 // 2. 这样可以监控所有进程间通信
 // 3. 内核服务层负责实现真正的进程管理逻辑
 
-use genshin_os::{
-    KernelMsg, ProcessRequest, IPCMessage, SignalType,
-    MessageBus, LockedBus, Pid,
-};
+use genshin_os::{IPCMessage, KernelMsg, LockedBus, MessageBus, Pid, ProcessRequest, SignalType};
 use std::sync::Arc;
 
 fn main() {
@@ -96,7 +93,7 @@ fn demo_shared_memory(bus: &Arc<LockedBus>) {
     // 进程 B 附加到共享内存区
     let msg = KernelMsg::Process(ProcessRequest::AttachSharedMemory {
         pid: 200,
-        shmid: 1,  // 假设返回的 shmid 是 1
+        shmid: 1, // 假设返回的 shmid 是 1
     });
     let _ = bus.send(msg);
     println!("   ✓ 进程 200 附加到共享内存区 1");
@@ -122,10 +119,7 @@ fn demo_synchronization(bus: &Arc<LockedBus>) {
     println!("   ✓ 创建信号量，初始值 = 1");
 
     // 等待信号量 (P 操作)
-    let msg = KernelMsg::Process(ProcessRequest::WaitSemaphore {
-        pid: 100,
-        semid: 1,
-    });
+    let msg = KernelMsg::Process(ProcessRequest::WaitSemaphore { pid: 100, semid: 1 });
     let _ = bus.send(msg);
     println!("   ✓ 进程 100 等待信号量 1");
 
@@ -151,10 +145,7 @@ fn demo_synchronization(bus: &Arc<LockedBus>) {
     println!("   ✓ 进程 200 释放锁 1");
 
     // 发送信号量 (V 操作)
-    let msg = KernelMsg::Process(ProcessRequest::SignalSemaphore {
-        pid: 100,
-        semid: 1,
-    });
+    let msg = KernelMsg::Process(ProcessRequest::SignalSemaphore { pid: 100, semid: 1 });
     let _ = bus.send(msg);
     println!("   ✓ 进程 100 发送信号量 1");
 }
@@ -181,9 +172,7 @@ fn demo_signals(bus: &Arc<LockedBus>) {
 /// 演示进程生命周期管理
 fn demo_process_lifecycle(bus: &Arc<LockedBus>) {
     // Fork 进程
-    let msg = KernelMsg::Process(ProcessRequest::ForkProcess {
-        parent_pid: 100,
-    });
+    let msg = KernelMsg::Process(ProcessRequest::ForkProcess { parent_pid: 100 });
     let _ = bus.send(msg);
     println!("   ✓ 进程 100 fork 子进程");
 

@@ -2,15 +2,13 @@
 //
 // 简单演示如何使用 genshin-OS 的请求-响应机制
 
+use crossbeam_channel::RecvTimeoutError;
 use genshin_os::{
-    KernelMsg, MemoryRequest,
-    MessageBus, LockedBus,
-    RequestWithResponse, Response, ResponseData,
+    KernelMsg, LockedBus, MemoryRequest, MessageBus, RequestWithResponse, Response, ResponseData,
     ServiceError,
 };
 use std::sync::Arc;
 use std::thread;
-use crossbeam_channel::RecvTimeoutError;
 
 fn main() {
     println!("=== genshin-OS 响应机制示例 ===\n");

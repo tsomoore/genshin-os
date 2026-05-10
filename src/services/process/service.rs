@@ -990,6 +990,19 @@ impl ProcessService {
             if let Some(cpu) = cpus.remove(&pid) {
                 vprintln!("PS: '{}' done after {} instructions", executable, cpu.dump_state().instruction_count);
             }
+            drop(cpus);
+            {
+                let mut scheduler = self.scheduler.lock().unwrap();
+                scheduler.remove(pid, 1);
+            }
+            {
+                let mut table = self.process_table.lock().unwrap();
+                if let Some(pcb_arc) = table.remove(&pid) {
+                    if let Ok(mut pcb) = pcb_arc.lock() {
+                        pcb.state = ProcessState::Terminated { exit_code: 0 };
+                    }
+                }
+            }
             self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
             self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
         } else {
@@ -1059,6 +1072,19 @@ impl ProcessService {
         let mut cpus = self.cpus.lock().unwrap();
         if let Some(cpu) = cpus.remove(&pid) {
             vprintln!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
+        }
+        drop(cpus);
+        {
+            let mut scheduler = self.scheduler.lock().unwrap();
+            scheduler.remove(pid, 1);
+        }
+        {
+            let mut table = self.process_table.lock().unwrap();
+            if let Some(pcb_arc) = table.remove(&pid) {
+                if let Ok(mut pcb) = pcb_arc.lock() {
+                    pcb.state = ProcessState::Terminated { exit_code: 0 };
+                }
+            }
         }
         self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
         self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();

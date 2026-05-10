@@ -6,11 +6,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use genshin_os::{
-    KernelMsg, LockedBus, MessageBus,
-    FileRequest, FileSystemType,
-};
 use genshin_os::services::file::FileService;
+use genshin_os::{FileRequest, FileSystemType, KernelMsg, LockedBus, MessageBus};
 
 fn section(title: &str) {
     println!("\n{}", "=".repeat(58));
@@ -18,7 +15,9 @@ fn section(title: &str) {
     println!("{}", "=".repeat(58));
 }
 
-fn wait() { thread::sleep(Duration::from_millis(200)); }
+fn wait() {
+    thread::sleep(Duration::from_millis(200));
+}
 
 fn main() {
     println!("╔══════════════════════════════════════════════════════╗");
@@ -38,7 +37,9 @@ fn main() {
 
     section("1. 创建目录 (FileRequest::CreateDirectory)");
     for d in &["/docs", "/home", "/tmp"] {
-        let msg = KernelMsg::File(FileRequest::CreateDirectory { path: d.to_string() });
+        let msg = KernelMsg::File(FileRequest::CreateDirectory {
+            path: d.to_string(),
+        });
         bus.send(msg).unwrap();
         println!("   📤 CreateDirectory(\"{}\")", d);
         wait();
@@ -46,21 +47,27 @@ fn main() {
     println!("   ✅ 3 个目录已创建");
 
     section("2. 列出根目录 (FileRequest::OpenDirectory)");
-    let msg = KernelMsg::File(FileRequest::OpenDirectory { path: "/".to_string() });
+    let msg = KernelMsg::File(FileRequest::OpenDirectory {
+        path: "/".to_string(),
+    });
     bus.send(msg).unwrap();
     println!("   📤 OpenDirectory(\"/\")");
     wait();
     println!("   ✅ 根目录内容已列出");
 
     section("3. 文件元数据 (FileRequest::Stat)");
-    let msg = KernelMsg::File(FileRequest::Stat { path: "/docs".to_string() });
+    let msg = KernelMsg::File(FileRequest::Stat {
+        path: "/docs".to_string(),
+    });
     bus.send(msg).unwrap();
     println!("   📤 Stat(\"/docs\")");
     wait();
     println!("   ✅ 目录 /docs 的元数据已返回");
 
     section("4. 删除节点 (FileRequest::Unlink)");
-    let msg = KernelMsg::File(FileRequest::Unlink { path: "/tmp".to_string() });
+    let msg = KernelMsg::File(FileRequest::Unlink {
+        path: "/tmp".to_string(),
+    });
     bus.send(msg).unwrap();
     println!("   📤 Unlink(\"/tmp\")");
     wait();
