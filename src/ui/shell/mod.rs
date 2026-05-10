@@ -231,6 +231,11 @@ impl Shell {
                 println!("stat: '{}'", path);
                 Ok(())
             }
+            "dual" => {
+                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "dual".into(), params: vec![] });
+                let _ = self.send_and_wait(msg)?;
+                Ok(())
+            }
             "disk" => {
                 let msg = KernelMsg::File(crate::messaging::FileRequest::DiskInfo);
                 match self.send_and_wait(msg) {

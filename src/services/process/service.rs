@@ -60,8 +60,6 @@ pub struct ProcessService {
     _hw: crate::hardware::PhysicalMemory,
     _mmu: Arc<crate::hardware::MMU>,
     cpus: Arc<Mutex<HashMap<Pid, crate::hardware::VirtualCPU>>>,
-    /// Time slice tracking: (current pid, instructions since last schedule)
-    slice_state: Arc<Mutex<(Option<Pid>, u64)>>,
 }
 
 impl std::fmt::Debug for ProcessService {
@@ -80,11 +78,11 @@ impl ProcessService {
             next_pid: Arc::new(Mutex::new(1)),
             ipc_manager: Arc::new(Mutex::new(IPCManager::new())),
             sync_manager: Arc::new(Mutex::new(SyncManager::new())),
-            scheduler: Arc::new(Mutex::new(Scheduler::round_robin(10))),
+            scheduler: Arc::new(Mutex::new(Scheduler::round_robin(3))),
             parent_children: Arc::new(Mutex::new(HashMap::new())),
             _hw: hw, _mmu: mmu,
             cpus: Arc::new(Mutex::new(HashMap::new())),
-            slice_state: Arc::new(Mutex::new((None, 0))),
+
         }
     }
 
@@ -452,52 +450,21 @@ impl ProcessService {
         Ok(())
     }
 
-    const TIME_QUANTUM: u64 = 10;
+    // Scheduler quantum: 3 timer ticks per time slice (= ~9 instructions)
 
     fn handle_timer_interrupt(&self) -> GenshinResult<()> {
         let mut scheduler = Self::lock_mutex(&self.scheduler)?;
-        let decision = scheduler.schedule();
+        let decision = scheduler.schedule(); // Scheduler handles time-slice switching
         drop(scheduler);
 
         if let SchedulingDecision::Run { pid, .. } = decision {
-            // Reset slice counter if switching to a different process
-            {
-                let mut slice = self.slice_state.lock().unwrap();
-                if slice.0 != Some(pid) {
-                    slice.0 = Some(pid);
-                    slice.1 = 0;
-                }
-            }
-
             let mut cpus = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?;
             if let Some(cpu) = cpus.get_mut(&pid) {
                 if !cpu.is_halted() {
                     for _ in 0..3 {
-                        // Preempt if time quantum exhausted
-                        {
-                            let mut slice = self.slice_state.lock().unwrap();
-                            if slice.0 == Some(pid) && slice.1 >= Self::TIME_QUANTUM {
-                                vprintln!("CPU[{}]: quantum expired, preempting", pid);
-                                slice.1 = 0;
-                                // Re-enqueue and pick next
-                                let mut sched = Self::lock_mutex(&self.scheduler)?;
-                                sched.ready(pid, 1, 128);
-                                let next = sched.schedule();
-                                drop(sched);
-                                if let SchedulingDecision::Run { pid: new_pid, .. } = next {
-                                    slice.0 = Some(new_pid);
-                                    break; // exit this CPU loop, will run new process next tick
-                                }
-                            }
-                        }
                         if cpu.is_halted() { break; }
                         if cpu.step().is_err() { cpu.halt(); break; }
-                        // Count this instruction
-                        {
-                            let mut slice = self.slice_state.lock().unwrap();
-                            if slice.0 == Some(pid) { slice.1 += 1; }
-                        }
-                        // Retry: Kernel may not have forwarded the interrupt yet
+                        // Handle interrupts
                         for _ in 0..20 {
                             while let Ok(env) = self.intr_rx.try_recv() {
                                 if let KernelMsg::Interrupt(int) = &env.message {
@@ -1095,6 +1062,57 @@ impl ProcessService {
 
     fn handle_spawn(&self, program: String, params: Vec<u8>, envelope: &Envelope) -> GenshinResult<()> {
         use crate::hardware::{PageFlags, VirtualCPU};
+
+        // Special: dual mode — run two processes concurrently to demo scheduling
+        if program == "dual" {
+            let busy = self.gen_builtin_program("busy", 0);
+            let mut pids = Vec::new();
+            for _ in 0..2 {
+                let pid = { let mut n = self.next_pid.lock().unwrap(); let p = *n; *n += 1; p };
+                let frames = self.alloc_frames(1)?;
+                let base = frames[0];
+                for (i, &addr) in frames.iter().enumerate() {
+                    if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
+                        pid, virt: (i * 4096) as u64, phys: addr,
+                        prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
+                    })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
+                }
+                self.write_slice_virt(pid, 0, &busy);
+                let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
+                cpu.set_pc(0); cpu.set_sp(0xFFFF);
+                { let mut c = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?; c.insert(pid, cpu); }
+                let mut pcb = crate::services::process::PCB::new(pid, "busy".into(), None);
+                pcb.state = ProcessState::Ready;
+                self.process_table.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 61, msg: "table".into() }))?
+                    .insert(pid, Arc::new(Mutex::new(pcb)));
+                self.handle_schedule(pid, 1)?;
+                vprintln!("PS: Spawn 'busy' (PID {})", pid);
+                pids.push((pid, base));
+            }
+            // Drive scheduler until all processes complete
+            for _ in 0..200 {
+                let all_halted = pids.iter().all(|(p, _)| {
+                    self.cpus.lock().unwrap().get(p).map(|cpu| cpu.is_halted()).unwrap_or(true)
+                });
+                if all_halted { break; }
+                let _ = self.handle_timer_interrupt();
+            }
+            // Cleanup both processes
+            for (pid, base) in pids {
+                let mut cpus = self.cpus.lock().unwrap();
+                if let Some(cpu) = cpus.remove(&pid) {
+                    vprintln!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
+                }
+                drop(cpus);
+                { let mut s = self.scheduler.lock().unwrap(); s.remove(pid, 1); }
+                { let mut t = self.process_table.lock().unwrap(); t.remove(&pid); }
+                self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
+                self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
+            }
+            let _ = envelope.respond_success(ResponseData::Void);
+            return Ok(());
+        }
+
         let pid = { let mut n = self.next_pid.lock().unwrap(); let p = *n; *n += 1; p };
 
         let p_len = params.len();
