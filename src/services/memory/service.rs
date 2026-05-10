@@ -59,8 +59,7 @@ impl MemoryService {
     }
 
     /// Create a new memory service
-    pub fn new(bus: Arc<dyn MessageBus>, hw: PhysicalMemory, mmu: Arc<MMU>) -> Self {
-        let receiver = bus.subscribe();
+    pub fn new(bus: Arc<dyn MessageBus>, hw: PhysicalMemory, mmu: Arc<MMU>, receiver: Receiver<Envelope>) -> Self {
         let size = hw.size();
         let memory_manager = Arc::new(Mutex::new(PhysicalMemoryManager::new(size, 4096)));
         let page_tables = Arc::new(Mutex::new(PageTableManager::new(4096, 256)));

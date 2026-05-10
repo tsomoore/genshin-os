@@ -54,9 +54,8 @@ impl FileService {
         bus: Arc<dyn MessageBus>,
         max_fds_per_process: u32,
         disk_size: usize,
+        receiver: Receiver<Envelope>,
     ) -> Self {
-        let receiver = bus.subscribe();
-
         let vfs = Arc::new(Mutex::new(VirtualFileSystem::new()));
         let fd_manager = Arc::new(Mutex::new(FileDescriptorManager::new(max_fds_per_process)));
         let open_files = Arc::new(Mutex::new(HashMap::new()));

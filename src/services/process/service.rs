@@ -67,10 +67,7 @@ impl std::fmt::Debug for ProcessService {
 }
 
 impl ProcessService {
-    /// Create a new process service
-    pub fn new(bus: Arc<dyn MessageBus>, hw: crate::hardware::PhysicalMemory, mmu: Arc<crate::hardware::MMU>) -> Self {
-        let receiver = bus.subscribe();
-
+    pub fn new(bus: Arc<dyn MessageBus>, hw: crate::hardware::PhysicalMemory, mmu: Arc<crate::hardware::MMU>, receiver: Receiver<Envelope>) -> Self {
         Self {
             bus,
             receiver,
