@@ -476,7 +476,13 @@ impl ProcessService {
                     for _ in 0..3 {
                         if cpu.is_halted() { break; }
                         if cpu.step().is_err() { cpu.halt(); break; }
-                        // Handle interrupts
+                        // Direct syscall handling (no bus round-trip needed)
+                        if cpu.syscall_pending {
+                            cpu.syscall_pending = false;
+                            self.handle_file_syscall(cpu, cpu.syscall_regs[0], cpu.syscall_regs[1], cpu.syscall_regs[2]);
+                            if cpu.is_halted() { break; }
+                        }
+                        // Handle bus-based interrupts (pagefault etc)
                         for _ in 0..20 {
                             while let Ok(env) = self.intr_rx.try_recv() {
                                 if let KernelMsg::Interrupt(int) = &env.message {

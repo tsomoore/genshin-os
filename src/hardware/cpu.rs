@@ -245,6 +245,9 @@ pub struct VirtualCPU {
 
     /// Halted state
     pub halted: bool,
+    /// Pending syscall: registers at time of INT
+    pub syscall_pending: bool,
+    pub syscall_regs: [u64; 4],
 
     /// MMU for memory access
     mmu: Arc<MMU>,
@@ -271,6 +274,8 @@ impl VirtualCPU {
             bus,
             instruction_count: 0,
             pagefault_pending: false,
+            syscall_pending: false,
+            syscall_regs: [0; 4],
         }
     }
 
@@ -628,14 +633,14 @@ impl VirtualCPU {
     fn handle_software_interrupt(&mut self, vector: u8) -> Result<(), CPUError> {
         // Check if it's a syscall (INT 0x80)
         if vector == InterruptVector::Syscall.as_u8() {
-            // Save current context (simplified - just PC for now)
-            // In a real implementation, would save all registers to TCB
+            // Save registers for direct handler access
+            self.syscall_regs = self.registers;
+            self.syscall_pending = true;
 
-            // Send syscall interrupt to kernel
+            // Also send via bus for traditional path (backward compat)
             let msg = KernelMsg::Interrupt(Interrupt::SyscallTrap);
             let _ = self.bus.send(msg);
 
-            // Continue execution (kernel will handle the syscall)
             Ok(())
         } else {
             // Unknown interrupt vector

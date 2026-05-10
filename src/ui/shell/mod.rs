@@ -249,9 +249,17 @@ impl Shell {
                 Ok(())
             }
             "exec" => {
-                let pid: u64 = command.args.get(0).and_then(|s| s.parse().ok()).unwrap_or(1);
-                let prog = command.args.get(1).cloned().unwrap_or_default();
-                let a: Vec<String> = command.args.iter().skip(2).cloned().collect();
+                // exec <prog>        → PID 1, program <prog>
+                // exec <pid> <prog>  → explicit PID
+                let (pid, prog): (u64, String) = match command.args.len() {
+                    0 => return Err("exec: missing program".into()),
+                    1 => (1, command.args[0].clone()),
+                    _ => (
+                        command.args[0].parse().unwrap_or(1),
+                        command.args[1].clone(),
+                    ),
+                };
+                let a: Vec<String> = if command.args.len() > 2 { command.args[2..].to_vec() } else { vec![] };
                 let msg = KernelMsg::Process(ProcessRequest::ExecProcess { pid, executable: prog.clone(), args: a });
                 let _ = self.send_and_wait(msg)?;
                 println!("exec: PID {} now '{}'", pid, prog);
