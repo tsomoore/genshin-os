@@ -351,9 +351,21 @@ impl VirtualCPU {
 
         match self.fetch_instruction() {
             Ok(instr) => {
-                self.execute_instruction(instr)?;
-                self.instruction_count += 1;
-                Ok(())
+                match self.execute_instruction(instr) {
+                    Ok(()) => {
+                        self.instruction_count += 1;
+                        Ok(())
+                    }
+                    Err(CPUError::PageFault { vaddr, .. }) => {
+                        let msg = KernelMsg::Interrupt(Interrupt::PageFault {
+                            addr: vaddr, access_type: crate::messaging::AccessType::Read,
+                        });
+                        let _ = self.bus.send(msg);
+                        self.pagefault_pending = true;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Err(CPUError::PageFault { vaddr, .. }) => {
                 let msg = KernelMsg::Interrupt(Interrupt::PageFault {
