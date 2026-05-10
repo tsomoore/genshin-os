@@ -97,17 +97,19 @@ impl ProcessService {
         }
 
         loop {
-            match self.receiver.recv_timeout(std::time::Duration::from_millis(50)) {
+            // try_recv + sleep: guaranteed to drive timer every 10ms
+            match self.receiver.try_recv() {
                 Ok(envelope) => {
                     if let Err(e) = self.handle_envelope(envelope) {
                         eprintln!("ProcessService error: {}", e);
                     }
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     let _ = self.handle_timer_interrupt();
-                    eprintln!("[TICK]");
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    let _ = self.handle_timer_interrupt();
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     eprintln!("Message bus disconnected");
                     break;
                 }
@@ -465,6 +467,7 @@ impl ProcessService {
         let mut scheduler = Self::lock_mutex(&self.scheduler)?;
         let decision = scheduler.schedule(); // Scheduler handles time-slice switching
         drop(scheduler);
+
 
         if let SchedulingDecision::Run { pid, .. } = decision {
             let mut cpus = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?;
@@ -1337,7 +1340,7 @@ impl ProcessService {
             10 => {
                 let flags = if r1 == 0 { OpenFlags::read_only() } else { OpenFlags::create() };
                 if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Open { path, flags })) {
-                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
                         if let Some(ResponseData::Fd(fd)) = resp.data() {
                             cpu.write_register(crate::hardware::Register::R1, *fd as u64);
                         }
@@ -1347,7 +1350,7 @@ impl ProcessService {
             11 => { self.bus.send(KernelMsg::File(FileRequest::Close { fd: r1 as u32 })).ok(); }
             12 => {
                 if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Read { fd: r1 as u32, offset: 0, buf: 0, size: r2 as usize })) {
-                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
                         if let Some(ResponseData::Bytes(data)) = resp.data() {
                             if !data.is_empty() { println!("{}", String::from_utf8_lossy(data).trim_end()); }
                         }
@@ -1363,7 +1366,7 @@ impl ProcessService {
             17 => { self.bus.send(KernelMsg::File(FileRequest::Stat { path })).ok(); }
             18 => {
                 if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::ListDir { path })) {
-                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
                         if let Some(ResponseData::StringList(entries)) = resp.data() {
                             for e in entries { println!("{}", e); }
                         }
