@@ -58,6 +58,7 @@ pub struct ProcessService {
     /// Parent-child relationships (pid -> children pids)
     parent_children: Arc<Mutex<HashMap<Pid, Vec<Pid>>>>,
     _hw: crate::hardware::PhysicalMemory,
+    _mmu: Arc<crate::hardware::MMU>,
     cpus: Arc<Mutex<HashMap<Pid, crate::hardware::VirtualCPU>>>,
 }
 
@@ -68,6 +69,7 @@ impl std::fmt::Debug for ProcessService {
 }
 
 impl ProcessService {
+    pub fn new(bus: Arc<dyn MessageBus>, hw: crate::hardware::PhysicalMemory, mmu: Arc<crate::hardware::MMU>, receiver: Receiver<Envelope>, intr_rx: Receiver<Envelope>) -> Self {
         Self {
             bus,
             receiver,
@@ -104,7 +106,7 @@ impl ProcessService {
                     let _ = self.handle_timer_interrupt();
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                     let _ = self.handle_timer_interrupt();
                 }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
@@ -465,13 +467,15 @@ impl ProcessService {
         let mut scheduler = Self::lock_mutex(&self.scheduler)?;
         let decision = scheduler.schedule(); // Scheduler handles time-slice switching
         drop(scheduler);
-        let rcnt = { let s = Self::lock_mutex(&self.scheduler).unwrap(); s.ready_count() };
+
 
         if let SchedulingDecision::Run { pid, .. } = decision {
             let mut cpus = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?;
             if let Some(cpu) = cpus.get_mut(&pid) {
                 if !cpu.is_halted() {
-                    for si in 0..3 {
+                    for _ in 0..3 {
+                        if cpu.is_halted() { break; }
+                        if cpu.step().is_err() { cpu.halt(); break; }
                         // Direct syscall handling (no bus round-trip needed)
                         if cpu.syscall_pending {
                             cpu.syscall_pending = false;
@@ -1342,7 +1346,7 @@ impl ProcessService {
             10 => {
                 let flags = if r1 == 0 { OpenFlags::read_only() } else { OpenFlags::create() };
                 if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Open { path, flags })) {
-                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
                         if let Some(ResponseData::Fd(fd)) = resp.data() {
                             cpu.write_register(crate::hardware::Register::R1, *fd as u64);
                         }
@@ -1352,7 +1356,7 @@ impl ProcessService {
             11 => { self.bus.send(KernelMsg::File(FileRequest::Close { fd: r1 as u32 })).ok(); }
             12 => {
                 if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Read { fd: r1 as u32, offset: 0, buf: 0, size: r2 as usize })) {
-                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
                         if let Some(ResponseData::Bytes(data)) = resp.data() {
                             if !data.is_empty() { println!("{}", String::from_utf8_lossy(data).trim_end()); }
                         }
@@ -1368,7 +1372,7 @@ impl ProcessService {
             17 => { self.bus.send(KernelMsg::File(FileRequest::Stat { path })).ok(); }
             18 => {
                 if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::ListDir { path })) {
-                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
                         if let Some(ResponseData::StringList(entries)) = resp.data() {
                             for e in entries { println!("{}", e); }
                         }
@@ -1405,6 +1409,7 @@ mod tests {
     fn make_service() -> ProcessService {
         let bus = Arc::new(LockedBus::new());
         let mem = crate::hardware::PhysicalMemory::new(1024 * 1024);
+        let mmu = Arc::new(crate::hardware::MMU::new(mem.clone(), 4096));
         ProcessService::new(bus, mem, mmu)
     }
 
