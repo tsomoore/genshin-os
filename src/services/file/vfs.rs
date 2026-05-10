@@ -271,10 +271,11 @@ impl VirtualFileSystem {
 
     /// Look up a node by path
     pub fn lookup_path(&self, path: &str) -> GenshinResult<Arc<Mutex<VFSNode>>> {
-        if path.is_empty() {
-            return Err(GenshinError::Service(ServiceError::InvalidArguments {
-                param: "path".to_string(),
-                reason: "Path cannot be empty".to_string(),
+        if path.is_empty() || path == "/" {
+            // Empty or root: return root node
+            return self.lookup(self.root_inode).ok_or_else(|| GenshinError::Service(ServiceError::NotFound {
+                resource_type: "Root".to_string(),
+                id: self.root_inode.to_string(),
             }));
         }
 
