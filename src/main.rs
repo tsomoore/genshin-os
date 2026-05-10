@@ -4,6 +4,7 @@ use genshin_os::{Shell, LockedBus};
 use genshin_os::services::kernel::Kernel;
 use genshin_os::services::process::ProcessService;
 use genshin_os::services::file::FileService;
+use genshin_os::services::memory::MemoryService;
 use genshin_os::hardware::{PhysicalMemory, MMU};
 use std::sync::Arc;
 use std::thread;
@@ -31,8 +32,16 @@ fn main() {
     });
     println!("\u{2713} Process service");
 
-    // MemoryService is not started — included for future
-    // FileService — receives from kernel channel
+    // MemoryService — receives from kernel channel
+    let mem_bus = bus.clone();
+    let mem_hw = hw_memory.clone();
+    let mem_mmu = mmu.clone();
+    let _memory_handle = thread::spawn(move || {
+        let service = MemoryService::new(mem_bus, mem_hw, mem_mmu, mrx);
+        service.run();
+    });
+    println!("\u{2713} Memory service");
+
     let file_bus = bus.clone();
     let _file_handle = thread::spawn(move || {
         let service = FileService::new(file_bus, 256, 1024 * 1024, frx);
