@@ -471,7 +471,13 @@ impl ProcessService {
                                             self.handle_file_syscall(cpu, st.registers[0], st.registers[1], st.registers[2]);
                                             if cpu.is_halted() { break; }
                                         }
-                                        crate::messaging::Interrupt::PageFault { .. } => {
+                                        crate::messaging::Interrupt::PageFault { addr, .. } => {
+                                            // Forward to MemoryService for handling
+                                            let _ = self.bus.send_request(KernelMsg::Memory(
+                                                crate::messaging::MemoryRequest::PageFaultHandler {
+                                                    pid: cpu.pid(), faulting_addr: addr,
+                                                    access_type: crate::messaging::AccessType::Read,
+                                                }));
                                             cpu.pagefault_pending = false;
                                         }
                                         _ => {}
