@@ -167,6 +167,11 @@ impl Scheduler {
 
     /// Remove a process/thread from the ready queue
     pub fn remove(&mut self, pid: Pid, tid: Tid) -> bool {
+        // Clear current if this is the running process
+        if self.current == Some((pid, tid)) {
+            self.current = None;
+            self.time_used = 0;
+        }
         // Check ready queue
         if let Some(pos) = self.ready_queue.iter().position(|e| e.pid == pid && e.tid == tid) {
             self.ready_queue.remove(pos);

@@ -105,6 +105,7 @@ impl ProcessService {
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     let _ = self.handle_timer_interrupt();
+                    eprintln!("[TICK]");
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     eprintln!("Message bus disconnected");
@@ -506,18 +507,52 @@ impl ProcessService {
                 }
             }
 
-            // Auto-cleanup halted processes driven by background timer
+            // xv6-style: halt → Zombie (parent or init will reap)
             if cpus.get(&pid).map(|c| c.is_halted()).unwrap_or(false) {
                 drop(cpus);
                 self.scheduler.lock().unwrap().remove(pid, 1);
-                // Keep PCB for parent to wait on; mark as zombie
                 if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
-                    if let Ok(mut p) = pcb.lock() { p.state = ProcessState::Terminated { exit_code: 0 }; }
+                    if let Ok(mut p) = pcb.lock() {
+                        if !p.state.is_terminated() {
+                            p.state = ProcessState::Zombie { exit_code: 0 };
+                            vprintln!("PS: PID {} → Zombie", pid);
+                        }
+                    }
                 }
-                vprintln!("PS: PID {} terminated by timer", pid);
+            }
+        } else {
+            // Idle: init reaper — scan for zombie children and free them
+            let mut to_reap = Vec::new();
+            if let Ok(table) = Self::lock_mutex(&self.process_table) {
+                for (&pid, pcb) in table.iter() {
+                    if let Ok(p) = pcb.lock() {
+                        if matches!(p.state, ProcessState::Zombie { .. }) {
+                            to_reap.push(pid);
+                        }
+                    }
+                }
+            }
+            for pid in to_reap {
+                self.reap_process(pid);
             }
         }
         Ok(())
+    }
+
+    /// Reap a zombie process: free memory, remove from table
+    fn reap_process(&self, pid: Pid) {
+        // Unmap pages
+        let entries = self._mmu.get_page_entries(pid);
+        for (vaddr, _, _) in &entries {
+            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: *vaddr })).ok();
+        }
+        // Remove CPU
+        { self.cpus.lock().unwrap().remove(&pid); }
+        // Remove from process table
+        if let Ok(mut table) = Self::lock_mutex(&self.process_table) {
+            table.remove(&pid);
+            vprintln!("PS: PID {} reaped", pid);
+        }
     }
 
     // ========== IPC: Message Passing Handlers ==========
@@ -775,7 +810,15 @@ impl ProcessService {
         if let Some(parent_cpu) = self.cpus.lock().unwrap().get(&parent_pid) {
             let st = parent_cpu.dump_state();
             child_cpu.set_pc(st.pc); child_cpu.set_sp(st.sp);
+            // Copy registers (clone parent state)
+            for r in 0..4 {
+                if let Some(reg) = crate::hardware::Register::from_index(r) {
+                    child_cpu.write_register(reg, st.registers[r]);
+                }
+            }
         } else { child_cpu.set_pc(0); child_cpu.set_sp(0xFFFF); }
+        // xv6: child returns 0 from fork
+        child_cpu.write_register(crate::hardware::Register::R0, 0);
         {self.cpus.lock().unwrap().insert(child_pid, child_cpu);}
 
         // Create PCB
@@ -802,6 +845,14 @@ impl ProcessService {
 
     /// Exec: replace process memory and code
     fn exec_impl(&self, pid: Pid, executable: String, args: Vec<String>) -> GenshinResult<()> {
+        // Verify process exists (even zombie is OK — exec replaces everything)
+        {
+            let table = Self::lock_mutex(&self.process_table)?;
+            if !table.contains_key(&pid) {
+                return Err(GenshinError::Service(ServiceError::NotFound{resource_type:"Process".into(),id:pid.to_string()}));
+            }
+        }
+
         let code = if let Some(c) = self.load_program(&executable) { c } else {
             let b = self.gen_builtin_program(&executable, 0);
             if b[0] != 0xFF { b } else {
