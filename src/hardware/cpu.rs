@@ -349,6 +349,7 @@ impl VirtualCPU {
         if self.halted { return Err(CPUError::Halted); }
         if self.pagefault_pending { return Ok(()); }
 
+        let saved_pc = self.pc;
         match self.fetch_instruction() {
             Ok(instr) => {
                 match self.execute_instruction(instr) {
@@ -357,7 +358,7 @@ impl VirtualCPU {
                         Ok(())
                     }
                     Err(CPUError::PageFault { vaddr, .. }) => {
-                        let msg = KernelMsg::Interrupt(Interrupt::PageFault {
+                        self.pc = saved_pc; let msg = KernelMsg::Interrupt(Interrupt::PageFault {
                             addr: vaddr, access_type: crate::messaging::AccessType::Read,
                         });
                         let _ = self.bus.send(msg);
@@ -368,7 +369,7 @@ impl VirtualCPU {
                 }
             }
             Err(CPUError::PageFault { vaddr, .. }) => {
-                let msg = KernelMsg::Interrupt(Interrupt::PageFault {
+                self.pc = saved_pc; let msg = KernelMsg::Interrupt(Interrupt::PageFault {
                     addr: vaddr, access_type: crate::messaging::AccessType::Read,
                 });
                 let _ = self.bus.send(msg);
