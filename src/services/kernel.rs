@@ -51,3 +51,4 @@ impl Kernel {
             KernelMsg::Device(_) => {}
     }
 }
+}
