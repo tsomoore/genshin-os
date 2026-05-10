@@ -447,84 +447,24 @@ impl MemoryService {
         Ok(())
     }
 
-    fn handle_page_fault_with_response(&self, pid: Pid, faulting_addr: VirtAddr, access_type: AccessType, envelope: &Envelope) -> GenshinResult<()> {
-        vprintln!("MemoryService: Page fault for pid {} at {:#x} ({:?})", pid, faulting_addr, access_type);
-
-        // Get page table
-        let page_tables = Self::lock_mutex(&self.page_tables)?;
-        let table = page_tables.get_table(pid)
-            .ok_or_else(|| {
-                envelope.respond_error(MessagingServiceError::NotFound {
-                    resource: "Page table".to_string(),
-                    id: pid.to_string(),
-                }).ok();
-                GenshinError::Service(ServiceError::NotFound {
-                    resource_type: "Page table".to_string(),
-                    id: pid.to_string(),
-                })
-            })?;
-
-        let mut table = Self::lock_mutex(&table)?;
-
-        // Check if page is mapped
-        if let Some(entry) = table.lookup(faulting_addr) {
-            if entry.is_present() {
-                // Page is present but access denied
-                envelope.respond_error(MessagingServiceError::PermissionDenied {
-                    operation: format!("{:?}", access_type),
-                })?;
-                return Err(GenshinError::Service(ServiceError::PermissionDenied {
-                    operation: format!("{:?}", access_type),
-                    reason: "Access permission denied".to_string(),
-                }));
-            }
-        }
-
-        drop(table);
-
-        // Page not present - need to allocate frame and map it
-        // This is a simplified implementation
+    fn handle_page_fault_with_response(&self, pid: Pid, faulting_addr: VirtAddr, _at: AccessType, envelope: &Envelope) -> GenshinResult<()> {
+        vprintln!("MemoryService: Page fault pid {} at {:#x}", pid, faulting_addr);
         let mut memory = Self::lock_mutex(&self.memory_manager)?;
         let frames = memory.allocate_frames(pid, 1);
-
-        if frames.is_empty() {
-            // No physical memory available - try to swap
-            drop(memory);
-            let mut swap = Self::lock_mutex(&self.swap_manager)?;
-
-            if !swap.is_enabled() || !swap.has_space() {
-                let _ = envelope.respond_error(MessagingServiceError::ResourceExhausted {
-                    resource: "Memory".to_string(),
-                });
-                return Err(GenshinError::Service(ServiceError::ResourceExhausted {
-                    resource: "Memory".to_string(),
-                    available: 0,
-                    requested: 1,
-                }));
-            }
-
-            // TODO: Implement actual swap out logic
-            vprintln!("MemoryService: Would swap out page (not implemented)");
+        drop(memory);
+        if let Some(frame) = frames.first() {
+            use crate::hardware::PageFlags;
+            self.mmu.map_page(pid, faulting_addr, frame.address,
+                PageFlags { present: true, writable: true, user_accessible: true })
+                .map_err(|e| GenshinError::Service(ServiceError::Other { code: 70, msg: format!("{:?}", e) }))?;
+            vprintln!("MemoryService: PF handled {:#x} -> {:#x}", faulting_addr, frame.address);
+            let _ = envelope.respond_success(ResponseData::PhysicalAddr(frame.address));
+            Ok(())
         } else {
-            let frame = frames[0];
-            drop(memory);
-
-            // Map the page
-            let prot = match access_type {
-                AccessType::Read => MemProt::read_only(),
-                AccessType::Write => MemProt::read_write(),
-                AccessType::Execute => MemProt::execute(),
-            };
-
-            drop(page_tables);
-            self.handle_map_page(pid, faulting_addr, frame.address, prot)?;
+            let _ = envelope.respond_error(MessagingServiceError::ResourceExhausted { resource: "frames".into() });
+            Err(GenshinError::Service(ServiceError::ResourceExhausted { resource: "frames".into(), available: 0, requested: 1 }))
         }
-
-        envelope.respond_success(ResponseData::Void)?;
-        Ok(())
     }
-
-    // ========== Swap Management Handlers ==========
 
     fn handle_swap_out(&self, pid: Pid, virt: VirtAddr) -> GenshinResult<()> {
         let mut swap = Self::lock_mutex(&self.swap_manager)?;
