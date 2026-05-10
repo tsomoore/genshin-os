@@ -60,6 +60,8 @@ pub struct ProcessService {
     _hw: crate::hardware::PhysicalMemory,
     _mmu: Arc<crate::hardware::MMU>,
     cpus: Arc<Mutex<HashMap<Pid, crate::hardware::VirtualCPU>>>,
+    /// Time slice tracking: (current pid, instructions since last schedule)
+    slice_state: Arc<Mutex<(Option<Pid>, u64)>>,
 }
 
 impl std::fmt::Debug for ProcessService {
@@ -82,6 +84,7 @@ impl ProcessService {
             parent_children: Arc::new(Mutex::new(HashMap::new())),
             _hw: hw, _mmu: mmu,
             cpus: Arc::new(Mutex::new(HashMap::new())),
+            slice_state: Arc::new(Mutex::new((None, 0))),
         }
     }
 
@@ -449,18 +452,51 @@ impl ProcessService {
         Ok(())
     }
 
+    const TIME_QUANTUM: u64 = 10;
+
     fn handle_timer_interrupt(&self) -> GenshinResult<()> {
         let mut scheduler = Self::lock_mutex(&self.scheduler)?;
         let decision = scheduler.schedule();
         drop(scheduler);
 
         if let SchedulingDecision::Run { pid, .. } = decision {
+            // Reset slice counter if switching to a different process
+            {
+                let mut slice = self.slice_state.lock().unwrap();
+                if slice.0 != Some(pid) {
+                    slice.0 = Some(pid);
+                    slice.1 = 0;
+                }
+            }
+
             let mut cpus = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?;
             if let Some(cpu) = cpus.get_mut(&pid) {
                 if !cpu.is_halted() {
                     for _ in 0..3 {
+                        // Preempt if time quantum exhausted
+                        {
+                            let mut slice = self.slice_state.lock().unwrap();
+                            if slice.0 == Some(pid) && slice.1 >= Self::TIME_QUANTUM {
+                                vprintln!("CPU[{}]: quantum expired, preempting", pid);
+                                slice.1 = 0;
+                                // Re-enqueue and pick next
+                                let mut sched = Self::lock_mutex(&self.scheduler)?;
+                                sched.ready(pid, 1, 128);
+                                let next = sched.schedule();
+                                drop(sched);
+                                if let SchedulingDecision::Run { pid: new_pid, .. } = next {
+                                    slice.0 = Some(new_pid);
+                                    break; // exit this CPU loop, will run new process next tick
+                                }
+                            }
+                        }
                         if cpu.is_halted() { break; }
                         if cpu.step().is_err() { cpu.halt(); break; }
+                        // Count this instruction
+                        {
+                            let mut slice = self.slice_state.lock().unwrap();
+                            if slice.0 == Some(pid) { slice.1 += 1; }
+                        }
                         // Retry: Kernel may not have forwarded the interrupt yet
                         for _ in 0..20 {
                             while let Ok(env) = self.intr_rx.try_recv() {
@@ -472,7 +508,6 @@ impl ProcessService {
                                             if cpu.is_halted() { break; }
                                         }
                                         crate::messaging::Interrupt::PageFault { addr, .. } => {
-                                            // Forward to MemoryService for handling
                                             let _ = self.bus.send_request(KernelMsg::Memory(
                                                 crate::messaging::MemoryRequest::PageFaultHandler {
                                                     pid: cpu.pid(), faulting_addr: *addr,
@@ -485,9 +520,8 @@ impl ProcessService {
                                 }
                             }
                             if cpu.pagefault_pending { break; }
-                            // Small yield to let Kernel thread run
                             std::thread::sleep(std::time::Duration::from_micros(50));
-                    }
+                        }
                     }
                     let s = cpu.dump_state();
                     vprintln!("CPU[{}]: PC={:#06x} R0={} R1={} R2={} R3={} | IC={} {}",
@@ -1006,12 +1040,55 @@ impl ProcessService {
             self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
             self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
         } else {
-            let mut pcb = PCB::new(pid, executable.to_string(), None);
-            pcb.args = args;
-            self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
-                .insert(pid, Arc::new(Mutex::new(pcb)));
-            self.handle_schedule(pid, 1)?;
-            vprintln!("PS: Created {} (no code)", pid);
+            // Check if it's a built-in program
+            let builtin = self.gen_builtin_program(executable, 0);
+            if builtin[0] != 0xFF {
+                // Run built-in program inline (same as if branch)
+                let frame_count = (builtin.len() + 4095) / 4096;
+                let frames = self.alloc_frames(frame_count)?;
+                let base = frames[0];
+                use crate::hardware::VirtualCPU;
+                for (i, &addr) in frames.iter().enumerate() {
+                    if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
+                        pid, virt: (i * 4096) as u64, phys: addr,
+                        prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
+                    })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
+                }
+                self.write_slice_virt(pid, 0, &builtin);
+                let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
+                cpu.set_pc(0); cpu.set_sp(0xFFFF);
+                { let mut c = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?; c.insert(pid, cpu); }
+                let mut pcb = PCB::new(pid, executable.to_string(), None);
+                pcb.args = args; pcb.state = ProcessState::Ready;
+                self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
+                    .insert(pid, Arc::new(Mutex::new(pcb)));
+                self.handle_schedule(pid, 1)?;
+                for _ in 0..100 {
+                    if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() { break; } } else { break; }
+                    let _ = self.handle_timer_interrupt();
+                }
+                let mut cpus = self.cpus.lock().unwrap();
+                if let Some(cpu) = cpus.remove(&pid) {
+                    vprintln!("PS: '{}' done after {} instructions", executable, cpu.dump_state().instruction_count);
+                }
+                drop(cpus);
+                { let mut s = self.scheduler.lock().unwrap(); s.remove(pid, 1); }
+                {
+                    let mut table = self.process_table.lock().unwrap();
+                    if let Some(p) = table.remove(&pid) {
+                        if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Terminated { exit_code: 0 }; }
+                    }
+                }
+                self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
+                self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
+            } else {
+                let mut pcb = PCB::new(pid, executable.to_string(), None);
+                pcb.args = args;
+                self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
+                    .insert(pid, Arc::new(Mutex::new(pcb)));
+                self.handle_schedule(pid, 1)?;
+                vprintln!("PS: Created {} (no code)", pid);
+            }
         }
         Ok(pid)
     }
@@ -1105,6 +1182,15 @@ impl ProcessService {
             "cat"|"read" => [&mov(0, 10)[..], &int[..], &mov(0, 12)[..], &mov(2, 0x10)[..], &int[..], &mov(0, 11)[..], &int[..], &halt[..]].concat(),
             "write" => [&mov(1, 1)[..], &mov(0, 10)[..], &int[..], &mov(0, 13)[..], &mov(2, data_len as u8)[..], &int[..], &mov(0, 11)[..], &int[..], &halt[..]].concat(),
             "stat" => [&mov(0, 17)[..], &int[..], &halt[..]].concat(),
+            "busy" => {
+                // 15 MOV instructions (each 8 bytes, 1 cycle) + halt = >120 bytes, >10 quantum
+                let mut prog = Vec::new();
+                for i in 0..15u8 {
+                    prog.extend_from_slice(&mov(1, i));
+                }
+                prog.extend_from_slice(&halt);
+                prog
+            }
             _ => vec![0xFF,0x00,0x00,0x00, 0x00,0x00,0x00,0x00],
         }
     }
