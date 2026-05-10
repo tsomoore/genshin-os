@@ -35,8 +35,10 @@ pub struct ProcessService {
     /// Message bus for sending/receiving messages
     bus: Arc<dyn MessageBus>,
 
-    /// Receiver for message bus (envelopes)
+    /// Receiver from Kernel (service requests)
     receiver: Receiver<Envelope>,
+    /// Direct bus receiver for hardware interrupts
+    intr_rx: Receiver<Envelope>,
 
     /// Process table (pid -> PCB)
     process_table: Arc<Mutex<HashMap<Pid, Arc<Mutex<PCB>>>>>,
@@ -67,12 +69,13 @@ impl std::fmt::Debug for ProcessService {
 }
 
 impl ProcessService {
-    pub fn new(bus: Arc<dyn MessageBus>, hw: crate::hardware::PhysicalMemory, mmu: Arc<crate::hardware::MMU>, receiver: Receiver<Envelope>) -> Self {
+    pub fn new(bus: Arc<dyn MessageBus>, hw: crate::hardware::PhysicalMemory, mmu: Arc<crate::hardware::MMU>, receiver: Receiver<Envelope>, intr_rx: Receiver<Envelope>) -> Self {
         Self {
             bus,
             receiver,
+            intr_rx,
             process_table: Arc::new(Mutex::new(HashMap::new())),
-            next_pid: Arc::new(Mutex::new(1)), // Start from PID 1
+            next_pid: Arc::new(Mutex::new(1)),
             ipc_manager: Arc::new(Mutex::new(IPCManager::new())),
             sync_manager: Arc::new(Mutex::new(SyncManager::new())),
             scheduler: Arc::new(Mutex::new(Scheduler::round_robin(10))),
@@ -458,7 +461,7 @@ impl ProcessService {
                     for _ in 0..3 {
                         if cpu.is_halted() { break; }
                         if cpu.step().is_err() { cpu.halt(); break; }
-                        while let Ok(env) = self.receiver.try_recv() {
+                        while let Ok(env) = self.intr_rx.try_recv() {
                             if let KernelMsg::Interrupt(crate::messaging::Interrupt::SyscallTrap) = &env.message {
                                 let st = cpu.dump_state();
                                 self.handle_file_syscall(cpu, st.registers[0], st.registers[1], st.registers[2]);

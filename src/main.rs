@@ -18,7 +18,7 @@ fn main() {
     println!("\u{2713} Hardware + Message bus");
 
     // Kernel owns the bus subscription, creates service channels
-    let (kernel, prx, mrx, frx) = Kernel::new(bus.clone());
+    let (kernel, prx, irx, mrx, frx) = Kernel::new(bus.clone());
     let kernel_handle = thread::spawn(move || { kernel.run(); });
     println!("\u{2713} Kernel");
 
@@ -27,7 +27,7 @@ fn main() {
     let proc_mem = hw_memory.clone();
     let proc_mmu = mmu.clone();
     let _process_handle = thread::spawn(move || {
-        let service = ProcessService::new(process_bus, proc_mem, proc_mmu, prx);
+        let service = ProcessService::new(process_bus, proc_mem, proc_mmu, prx, irx);
         service.run();
     });
     println!("\u{2713} Process service");
