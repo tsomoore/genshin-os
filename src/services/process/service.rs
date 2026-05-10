@@ -694,103 +694,111 @@ impl ProcessService {
     // ========== Process Lifecycle Handlers ==========
 
     fn handle_fork(&self, parent_pid: Pid) -> GenshinResult<()> {
-        let table = Self::lock_mutex(&self.process_table)?;
-        if !table.contains_key(&parent_pid) {
-            return Err(GenshinError::Service(ServiceError::NotFound {
-                resource_type: "Process".to_string(),
-                id: parent_pid.to_string(),
-            }));
-        }
-
-        drop(table);
-
-        // Create child process
-        let child_pid = self.create_process("(fork)", Vec::new())?;
-
-        // Set up parent-child relationship
-        let mut parent_children = Self::lock_mutex(&self.parent_children)?;
-        parent_children.entry(parent_pid).or_insert_with(Vec::new).push(child_pid);
-
-        println!("ProcessService: Forked {} -> {}", parent_pid, child_pid);
+        self.fork_impl(parent_pid)?;
         Ok(())
     }
 
-    /// Handle fork with response
     fn handle_fork_with_response(&self, parent_pid: Pid, envelope: &Envelope) -> GenshinResult<()> {
-        let table = Self::lock_mutex(&self.process_table)?;
-        if !table.contains_key(&parent_pid) {
-            envelope.respond_error(MsgServiceError::NotFound {
-                resource: "Process".to_string(),
-                id: parent_pid.to_string(),
-            })?;
-            return Err(GenshinError::Service(ServiceError::NotFound {
-                resource_type: "Process".to_string(),
-                id: parent_pid.to_string(),
-            }));
+        let child_pid = self.fork_impl(parent_pid)?;
+        envelope.respond_success(ResponseData::Pid(child_pid))?;
+        Ok(())
+    }
+
+    /// Fork: clone parent memory + CPU state. Returns child PID.
+    fn fork_impl(&self, parent_pid: Pid) -> GenshinResult<Pid> {
+        // Check parent exists
+        {let t = Self::lock_mutex(&self.process_table)?;
+         if !t.contains_key(&parent_pid) {
+            return Err(GenshinError::Service(ServiceError::NotFound { resource_type: "Process".into(), id: parent_pid.to_string() }));
+         }}
+
+        let child_pid = {let mut n=self.next_pid.lock().unwrap(); let p=*n; *n+=1; p};
+
+        // Clone page table entries
+        for (vaddr, _paddr, flags) in self._mmu.get_page_entries(parent_pid) {
+            let rx = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame{count:1}))
+                .map_err(|_| GenshinError::Service(ServiceError::Other{code:90,msg:"alloc".into()}))?;
+            let resp = rx.recv_timeout(std::time::Duration::from_secs(2))
+                .map_err(|_| GenshinError::Service(ServiceError::Other{code:91,msg:"timeout".into()}))?;
+            let new_frame = match resp.data() {
+                Some(ResponseData::PhysicalAddr(a)) => *a,
+                _ => continue,
+            };
+            // Map child page
+            if let Ok(rx)=self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage{
+                pid:child_pid, virt:vaddr, phys:new_frame,
+                prot:crate::messaging::MemProt{readable:true,writable:true,executable:!flags.writable}
+            })) { let _=rx.recv_timeout(std::time::Duration::from_secs(2)); }
+            // Copy page content
+            for o in 0..4096u64 {
+                if let Ok(b)=self._mmu.read_u8(parent_pid, vaddr+o) {
+                    let _=self._mmu.write_u8(child_pid, vaddr+o, b);
+                }
+            }
         }
 
-        drop(table);
+        // Clone CPU state
+        use crate::hardware::VirtualCPU;
+        let mut child_cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), child_pid);
+        if let Some(parent_cpu) = self.cpus.lock().unwrap().get(&parent_pid) {
+            let st = parent_cpu.dump_state();
+            child_cpu.set_pc(st.pc); child_cpu.set_sp(st.sp);
+        } else { child_cpu.set_pc(0); child_cpu.set_sp(0xFFFF); }
+        {self.cpus.lock().unwrap().insert(child_pid, child_cpu);}
 
-        // Create child process
-        let child_pid = self.create_process("(fork)", Vec::new())?;
+        // Create PCB
+        let mut pcb = crate::services::process::PCB::new(child_pid, format!("(fork of {})",parent_pid), Some(parent_pid));
+        pcb.state = ProcessState::Ready;
+        self.process_table.lock().unwrap().insert(child_pid, Arc::new(Mutex::new(pcb)));
 
-        // Set up parent-child relationship
-        let mut parent_children = Self::lock_mutex(&self.parent_children)?;
-        parent_children.entry(parent_pid).or_insert_with(Vec::new).push(child_pid);
-
-        println!("ProcessService: Forked {} -> {}", parent_pid, child_pid);
-
-        // Send success response with child PID
-        envelope.respond_success(ResponseData::Pid(child_pid))?;
-
-        Ok(())
+        // Parent-child link + schedule
+        {Self::lock_mutex(&self.parent_children)?.entry(parent_pid).or_default().push(child_pid);}
+        self.handle_schedule(child_pid, 1)?;
+        vprintln!("PS: Fork {} -> {}", parent_pid, child_pid);
+        Ok(child_pid)
     }
 
     fn handle_exec(&self, pid: Pid, executable: String, args: Vec<String>) -> GenshinResult<()> {
-        let table = Self::lock_mutex(&self.process_table)?;
-        if let Some(pcb) = table.get(&pid) {
-            let mut pcb = Self::lock_mutex(pcb)?;
-            pcb.name = executable.clone();
-            pcb.args = args.clone();
+        self.exec_impl(pid, executable, args)
+    }
 
-            // Reset process state
-            pcb.state = ProcessState::Ready;
-            pcb.mmu_state = None;
-
-            println!("ProcessService: Exec {} in process {} ({:?})", executable, pid, args);
-        } else {
-            return Err(GenshinError::Service(ServiceError::NotFound {
-                resource_type: "Process".to_string(),
-                id: pid.to_string(),
-            }));
-        }
+    fn handle_exec_with_response(&self, pid: Pid, executable: String, args: Vec<String>, envelope: &Envelope) -> GenshinResult<()> {
+        self.exec_impl(pid, executable, args)?;
+        envelope.respond_success(ResponseData::Void)?;
         Ok(())
     }
 
-    /// Handle exec with response
-    fn handle_exec_with_response(&self, pid: Pid, executable: String, args: Vec<String>, envelope: &Envelope) -> GenshinResult<()> {
-        let table = Self::lock_mutex(&self.process_table)?;
-        if let Some(pcb) = table.get(&pid) {
-            let mut pcb = Self::lock_mutex(pcb)?;
-            pcb.name = executable.clone();
-            pcb.args = args.clone();
-
-            // Reset process state
-            // Reset process state
-            pcb.state = ProcessState::Ready;
-            // Clear memory map
-            // TODO: Implement actual memory clearing
-
-            println!("ProcessService: Executed process {} with {}", pid, executable);
-
-            envelope.respond_success(ResponseData::Void)?;
-        } else {
-            envelope.respond_error(MsgServiceError::NotFound {
-                resource: "Process".to_string(),
-                id: pid.to_string(),
-            })?;
+    /// Exec: replace process memory and code
+    fn exec_impl(&self, pid: Pid, executable: String, args: Vec<String>) -> GenshinResult<()> {
+        let code = if let Some(c) = self.load_program(&executable) { c } else {
+            let b = self.gen_builtin_program(&executable, 0);
+            if b[0] != 0xFF { b } else {
+                return Err(GenshinError::Service(ServiceError::NotFound{resource_type:"Program".into(),id:executable}));
+            }
+        };
+        // Unmap old pages
+        for (vaddr, _, _) in self._mmu.get_page_entries(pid) {
+            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage{pid,virt:vaddr})).ok();
         }
-
+        // Allocate + map new frames
+        let frames = self.alloc_frames((code.len()+4095)/4096)?;
+        for (i, &addr) in frames.iter().enumerate() {
+            if let Ok(rx)=self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage{
+                pid, virt:(i*4096)as u64, phys:addr,
+                prot:crate::messaging::MemProt{readable:true,writable:true,executable:true}
+            })) { let _=rx.recv_timeout(std::time::Duration::from_secs(2)); }
+        }
+        self.write_slice_virt(pid, 0, &code);
+        // Reset CPU
+        if let Some(cpu) = self.cpus.lock().unwrap().get_mut(&pid) {
+            cpu.set_pc(0); cpu.set_sp(0xFFFF);
+        }
+        // Update PCB
+        if let Some(p) = Self::lock_mutex(&self.process_table)?.get(&pid) {
+            let mut pcb = p.lock().unwrap();
+            pcb.name = executable.clone(); pcb.args = args; pcb.state = ProcessState::Ready;
+        }
+        vprintln!("PS: Exec '{}' in PID {}", executable, pid);
         Ok(())
     }
 

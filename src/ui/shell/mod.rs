@@ -236,11 +236,30 @@ impl Shell {
                 let _ = self.send_and_wait(msg)?;
                 Ok(())
             }
+            "fork" => {
+                let pid: u64 = command.args.get(0).and_then(|s| s.parse().ok()).unwrap_or(1);
+                let msg = KernelMsg::Process(ProcessRequest::ForkProcess { parent_pid: pid });
+                match self.send_and_wait(msg) {
+                    Ok(r) => {
+                        if r.is_error() { eprintln!("fork: {}", r.service_error().unwrap()); }
+                        else if let Some(ResponseData::Pid(c)) = r.data() { println!("fork: child PID = {}", c); }
+                    }
+                    Err(e) => eprintln!("fork: {}", e),
+                }
+                Ok(())
+            }
+            "exec" => {
+                let pid: u64 = command.args.get(0).and_then(|s| s.parse().ok()).unwrap_or(1);
+                let prog = command.args.get(1).cloned().unwrap_or_default();
+                let a: Vec<String> = command.args.iter().skip(2).cloned().collect();
+                let msg = KernelMsg::Process(ProcessRequest::ExecProcess { pid, executable: prog.clone(), args: a });
+                let _ = self.send_and_wait(msg)?;
+                println!("exec: PID {} now '{}'", pid, prog);
+                Ok(())
+            }
             "copy" => {
                 let text = command.args.join(" ");
-                let msg = KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardSet {
-                    data: text.as_bytes().to_vec(),
-                });
+                let msg = KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardSet { data: text.as_bytes().to_vec() });
                 self.context.send(msg);
                 println!("Copied: {}", text);
                 Ok(())
@@ -248,11 +267,7 @@ impl Shell {
             "paste" => {
                 let msg = KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardGet { max_size: 4096 });
                 match self.send_and_wait(msg) {
-                    Ok(resp) => {
-                        if let Some(ResponseData::Bytes(data)) = resp.data() {
-                            println!("{}", String::from_utf8_lossy(data));
-                        }
-                    }
+                    Ok(resp) => { if let Some(ResponseData::Bytes(data)) = resp.data() { println!("{}", String::from_utf8_lossy(data)); } }
                     Err(e) => eprintln!("paste: {}", e),
                 }
                 Ok(())

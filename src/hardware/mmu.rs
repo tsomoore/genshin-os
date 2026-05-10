@@ -143,6 +143,16 @@ impl MMU {
         tables.remove(&pid);
     }
 
+    /// Get all page table entries for a process (used for fork)
+    pub fn get_page_entries(&self, pid: Pid) -> Vec<(VirtAddr, PhysAddr, PageFlags)> {
+        let tables = self.page_tables.lock().unwrap();
+        if let Some(table) = tables.get(&pid) {
+            table.iter().map(|(&vaddr, entry)| (vaddr, entry.frame, entry.flags)).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Map a virtual page to a physical frame
     ///
     /// 曾国藩曰：
