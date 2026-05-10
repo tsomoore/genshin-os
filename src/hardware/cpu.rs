@@ -244,7 +244,7 @@ pub struct VirtualCPU {
     current_pid: Pid,
 
     /// Halted state
-    halted: bool,
+    pub halted: bool,
 
     /// MMU for memory access
     mmu: Arc<MMU>,

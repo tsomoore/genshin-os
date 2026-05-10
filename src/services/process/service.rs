@@ -90,15 +90,23 @@ impl ProcessService {
     pub fn run(&self) {
         println!("ProcessService starting...");
 
+        // Create init process (PID 1) — root of user process tree
+        match self.fork_impl(0) {
+            Ok(pid) => println!("PS: Init PID = {}", pid),
+            Err(e) => eprintln!("PS: Init failed: {}", e),
+        }
+
         loop {
-            match self.receiver.recv() {
+            match self.receiver.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(envelope) => {
-                    // Handle the envelope
                     if let Err(e) = self.handle_envelope(envelope) {
                         eprintln!("ProcessService error: {}", e);
                     }
                 }
-                Err(_) => {
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    let _ = self.handle_timer_interrupt();
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     eprintln!("Message bus disconnected");
                     break;
                 }
@@ -497,6 +505,17 @@ impl ProcessService {
                         s.instruction_count, if cpu.is_halted() { "[HALTED]" } else { "" });
                 }
             }
+
+            // Auto-cleanup halted processes driven by background timer
+            if cpus.get(&pid).map(|c| c.is_halted()).unwrap_or(false) {
+                drop(cpus);
+                self.scheduler.lock().unwrap().remove(pid, 1);
+                // Keep PCB for parent to wait on; mark as zombie
+                if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
+                    if let Ok(mut p) = pcb.lock() { p.state = ProcessState::Terminated { exit_code: 0 }; }
+                }
+                vprintln!("PS: PID {} terminated by timer", pid);
+            }
         }
         Ok(())
     }
@@ -706,7 +725,20 @@ impl ProcessService {
 
     /// Fork: clone parent memory + CPU state. Returns child PID.
     fn fork_impl(&self, parent_pid: Pid) -> GenshinResult<Pid> {
-        // Check parent exists
+        // PID 0 = kernel: create a fresh process (no parent, no memory)
+        if parent_pid == 0 {
+            let child_pid = {let mut n=self.next_pid.lock().unwrap(); let p=*n; *n+=1; p};
+            use crate::hardware::VirtualCPU;
+            let cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), child_pid);
+            {self.cpus.lock().unwrap().insert(child_pid, cpu);}
+            let pcb = crate::services::process::PCB::new(child_pid, "init".into(), None);
+            self.process_table.lock().unwrap().insert(child_pid, Arc::new(Mutex::new(pcb)));
+            // Not scheduled: init has no code; exec will schedule after loading program
+            vprintln!("PS: Fork 0 -> {} (fresh, not scheduled)", child_pid);
+            return Ok(child_pid);
+        }
+
+        // Check parent exists for normal fork
         {let t = Self::lock_mutex(&self.process_table)?;
          if !t.contains_key(&parent_pid) {
             return Err(GenshinError::Service(ServiceError::NotFound { resource_type: "Process".into(), id: parent_pid.to_string() }));
@@ -792,12 +824,15 @@ impl ProcessService {
         // Reset CPU
         if let Some(cpu) = self.cpus.lock().unwrap().get_mut(&pid) {
             cpu.set_pc(0); cpu.set_sp(0xFFFF);
+            cpu.halted = false; // unhalt: timer may have killed the empty fork
         }
         // Update PCB
         if let Some(p) = Self::lock_mutex(&self.process_table)?.get(&pid) {
             let mut pcb = p.lock().unwrap();
             pcb.name = executable.clone(); pcb.args = args; pcb.state = ProcessState::Ready;
         }
+        // Re-schedule: exec resets the process, must be in ready queue
+        self.handle_schedule(pid, 1)?;
         vprintln!("PS: Exec '{}' in PID {}", executable, pid);
         Ok(())
     }
