@@ -475,7 +475,7 @@ impl ProcessService {
                                             // Forward to MemoryService for handling
                                             let _ = self.bus.send_request(KernelMsg::Memory(
                                                 crate::messaging::MemoryRequest::PageFaultHandler {
-                                                    pid: cpu.pid(), faulting_addr: addr,
+                                                    pid: cpu.pid(), faulting_addr: *addr,
                                                     access_type: crate::messaging::AccessType::Read,
                                                 }));
                                             cpu.pagefault_pending = false;
