@@ -1480,13 +1480,23 @@ impl ProcessService {
             }
             11 => { self.bus.send(KernelMsg::File(FileRequest::Close { fd: r1 as u32 })).ok(); }
             12 => {
-                if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Read { fd: r1 as u32, offset: 0, buf: 0, size: r2 as usize })) {
-                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                        if let Some(ResponseData::Bytes(data)) = resp.data() {
-                            if !data.is_empty() { println!("{}", String::from_utf8_lossy(data).trim_end()); }
-                        }
-                    }
+                // Loop-read until EOF for cat-like behavior
+                let fd = r1 as u32;
+                let mut offset = 0u64;
+                let chunk = std::cmp::min(r2, 256) as usize;
+                loop {
+                    if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Read { fd, offset, buf: 0, size: chunk })) {
+                        if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                            if let Some(ResponseData::Bytes(data)) = resp.data() {
+                                if data.is_empty() { break; }
+                                print!("{}", String::from_utf8_lossy(&data));
+                                offset += data.len() as u64;
+                                if data.len() < chunk { break; }
+                            } else { break; }
+                        } else { break; }
+                    } else { break; }
                 }
+                println!(); // newline after file content
             }
             13 => {
                 let data = self.read_bytes_virt(pid, 0x200, r2 as usize);
