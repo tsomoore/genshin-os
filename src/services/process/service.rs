@@ -508,7 +508,7 @@ impl ProcessService {
                                                     pid: cpu.pid(), faulting_addr: *addr,
                                                     access_type: crate::messaging::AccessType::Read,
                                                 })) {
-                                                let _ = rx.recv_timeout(std::time::Duration::from_millis(100));
+                                                let _ = rx.recv_timeout(std::time::Duration::from_millis(200));
                                             }
                                             cpu.pagefault_pending = false;
                                         }
