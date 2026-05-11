@@ -371,6 +371,23 @@ impl FileService {
                 pid,
                 Self::open_flags_to_mode(flags)?,
             )));
+            // Load existing file content from disk
+            {
+                let vfs = Self::lock_mutex(&self.vfs)?;
+                if let Some(vnode) = vfs.lookup(inode) {
+                    let vn = vnode.lock().unwrap();
+                    if !vn.blocks.is_empty() {
+                        let mut f = new_file.lock().unwrap();
+                        f.start_sector = Some(vn.blocks[0] as u32);
+                        f.sector_count = vn.blocks.len() as u32;
+                        f.metadata.size = vn.size;
+                        let disk = self.disk.lock().unwrap();
+                        f.load_from_disk(&disk).ok();
+                        drop(disk);
+                    }
+                }
+                drop(vfs);
+            }
             Self::lock_mutex(&self.open_files)?.insert(inode, new_file.clone());
             new_file
         };
@@ -480,6 +497,23 @@ impl FileService {
                 pid,
                 Self::open_flags_to_mode(flags)?,
             )));
+            // Load existing file content from disk
+            {
+                let vfs = Self::lock_mutex(&self.vfs)?;
+                if let Some(vnode) = vfs.lookup(inode) {
+                    let vn = vnode.lock().unwrap();
+                    if !vn.blocks.is_empty() {
+                        let mut f = new_file.lock().unwrap();
+                        f.start_sector = Some(vn.blocks[0] as u32);
+                        f.sector_count = vn.blocks.len() as u32;
+                        f.metadata.size = vn.size;
+                        let disk = self.disk.lock().unwrap();
+                        f.load_from_disk(&disk).ok();
+                        drop(disk);
+                    }
+                }
+                drop(vfs);
+            }
             Self::lock_mutex(&self.open_files)?.insert(inode, new_file.clone());
             new_file
         };
@@ -586,9 +620,25 @@ impl FileService {
 
         let written = open_file.write(&data)?;
 
+        // Sync to disk for persistence
+        {
+            let inode = { open_file.file.lock().unwrap().inode };
+            let mut f = open_file.file.lock().unwrap();
+            let disk = self.disk.lock().unwrap();
+            if f.sync_to_disk(&disk).is_ok() {
+                if let Some(start) = f.start_sector {
+                    let mut vfs = self.vfs.lock().unwrap();
+                    if let Some(vnode) = vfs.lookup(inode) {
+                        let mut vn = vnode.lock().unwrap();
+                        vn.size = f.data.len() as u64;
+                        vn.blocks = (0..f.sector_count).map(|i: u32| (start + i) as u64).collect();
+                    }
+                }
+            }
+        }
+
         println!("FileService: Wrote {} bytes to fd {} for pid {}", written, fd, pid);
 
-        // TODO: Send response with bytes written
         Ok(())
     }
 
@@ -608,6 +658,23 @@ impl FileService {
             })?;
 
         let written = open_file.write(&data)?;
+
+        // Sync to disk for persistence
+        {
+            let inode = { open_file.file.lock().unwrap().inode };
+            let mut f = open_file.file.lock().unwrap();
+            let disk = self.disk.lock().unwrap();
+            if f.sync_to_disk(&disk).is_ok() {
+                if let Some(start) = f.start_sector {
+                    let mut vfs = self.vfs.lock().unwrap();
+                    if let Some(vnode) = vfs.lookup(inode) {
+                        let mut vn = vnode.lock().unwrap();
+                        vn.size = f.data.len() as u64;
+                        vn.blocks = (0..f.sector_count).map(|i: u32| (start + i) as u64).collect();
+                    }
+                }
+            }
+        }
 
         println!("FileService: Wrote {} bytes to fd {} for pid {}", written, fd, pid);
 

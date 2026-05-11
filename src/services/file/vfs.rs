@@ -375,7 +375,7 @@ impl VirtualFileSystem {
             let node = node_arc.lock().map_err(|_| GenshinError::Service(ServiceError::Other {
                 code: 99, msg: "vfs lock".into(),
             }))?;
-            nodes_vec.push((node.inode, node.node_type, node.name.clone(), node.parent, node.size, node.children.clone()));
+            nodes_vec.push((node.inode, node.node_type, node.name.clone(), node.parent, node.size, node.children.clone(), node.blocks.clone()));
         }
         let json = serde_json::to_string_pretty(&nodes_vec)
             .map_err(|e| GenshinError::Service(ServiceError::Other { code: 98, msg: format!("json: {}", e) }))?;
@@ -388,23 +388,23 @@ impl VirtualFileSystem {
     /// Load VFS from JSON file, returns new VFS
     pub fn load_from_file(path: &str) -> Option<Self> {
         let json = std::fs::read_to_string(path).ok()?;
-        let nodes_vec: Vec<(u64, NodeType, String, Option<u64>, u64, HashMap<String, u64>)> = serde_json::from_str(&json).ok()?;
+        let nodes_vec: Vec<(u64, NodeType, String, Option<u64>, u64, HashMap<String, u64>, Vec<u64>)> = serde_json::from_str(&json).ok()?;
         let mut vfs = Self::new();
         // First pass: create all nodes
-        for (inode, ntype, name, parent, size, _children) in &nodes_vec {
+        for (inode, ntype, name, parent, size, _children, blocks) in &nodes_vec {
             if *inode == 0 { continue; } // root already exists
             let node = Arc::new(Mutex::new(VFSNode {
                 inode: *inode, node_type: *ntype, name: name.clone(),
                 parent: *parent, permissions: 0o644, owner: 0,
                 size: *size, created: 0, modified: 0,
-                blocks: Vec::new(), children: HashMap::new(),
+                blocks: blocks.clone(), children: HashMap::new(),
                 ref_count: 0, deleted: false,
             }));
             vfs.nodes.insert(*inode, node);
             if *inode >= vfs.next_inode { vfs.next_inode = *inode + 1; }
         }
         // Second pass: restore children
-        for (inode, _, _, _, _, children) in &nodes_vec {
+        for (inode, _, _, _, _, children, _) in &nodes_vec {
             if let Some(node_arc) = vfs.nodes.get(inode) {
                 let mut node = node_arc.lock().ok()?;
                 node.children = children.clone();
