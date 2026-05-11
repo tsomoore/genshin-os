@@ -195,8 +195,25 @@ impl VirtualFileSystem {
         let mut vfs = Self { nodes, next_inode: 1, root_inode: 0, mounts: HashMap::new() };
 
         // Create standard directories
-        for name in &["bin", "home", "tmp", "etc", "var", "examples"] {
+        for name in &["bin", "home", "tmp", "etc", "var", "examples", "programs"] {
             let _ = vfs.create_directory(0, name.to_string(), 0);
+        }
+
+        // Populate /programs with .asm file entries
+        let asm_files = [
+            "add.asm", "busy.asm", "cat.asm", "count.asm", "divide.asm",
+            "exec.asm", "fork.asm", "hello.asm", "init.asm", "loop.asm",
+            "ls.asm", "mkdir.asm", "multiply.asm", "pf.asm", "rm.asm",
+            "stat.asm", "sub.asm", "touch.asm", "tree.asm", "write.asm",
+        ];
+        let prog_inode = {
+            let root = vfs.nodes.get(&0).unwrap().lock().unwrap();
+            root.children.get("programs").copied()
+        };
+        if let Some(prog_inode) = prog_inode {
+            for fname in &asm_files {
+                let _ = vfs.create_file(prog_inode, fname.to_string(), 0);
+            }
         }
 
         vfs

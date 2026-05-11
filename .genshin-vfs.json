@@ -1,29 +1,125 @@
 [
   [
-    7,
-    "File",
-    "hello.txt",
-    0,
     5,
-    {},
-    [
-      4
-    ]
-  ],
-  [
-    3,
     "Directory",
-    "tmp",
+    "var",
     0,
     0,
     {},
     []
   ],
   [
-    5,
-    "Directory",
-    "var",
     0,
+    "Directory",
+    "/",
+    null,
+    0,
+    {
+      "programs": 7,
+      "tmp": 3,
+      "examples": 6,
+      "bin": 1,
+      "home": 2,
+      "etc": 4,
+      "var": 5
+    },
+    []
+  ],
+  [
+    4,
+    "Directory",
+    "etc",
+    0,
+    0,
+    {},
+    []
+  ],
+  [
+    1,
+    "Directory",
+    "bin",
+    0,
+    0,
+    {},
+    []
+  ],
+  [
+    8,
+    "File",
+    "add.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    12,
+    "File",
+    "divide.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    10,
+    "File",
+    "cat.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    11,
+    "File",
+    "count.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    13,
+    "File",
+    "exec.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    15,
+    "File",
+    "hello.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    18,
+    "File",
+    "ls.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    17,
+    "File",
+    "loop.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    19,
+    "File",
+    "mkdir.asm",
+    7,
     0,
     {},
     []
@@ -47,57 +143,139 @@
     []
   ],
   [
-    4,
-    "Directory",
-    "etc",
+    23,
+    "File",
+    "stat.asm",
+    7,
     0,
+    {},
+    []
+  ],
+  [
+    25,
+    "File",
+    "touch.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    3,
+    "Directory",
+    "tmp",
+    0,
+    0,
+    {},
+    []
+  ],
+  [
+    26,
+    "File",
+    "tree.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    20,
+    "File",
+    "multiply.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    27,
+    "File",
+    "write.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    16,
+    "File",
+    "init.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    21,
+    "File",
+    "pf.asm",
+    7,
     0,
     {},
     []
   ],
   [
     9,
-    "Directory",
-    "sub",
-    8,
+    "File",
+    "busy.asm",
+    7,
     0,
     {},
     []
   ],
   [
-    8,
+    22,
+    "File",
+    "rm.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    14,
+    "File",
+    "fork.asm",
+    7,
+    0,
+    {},
+    []
+  ],
+  [
+    7,
     "Directory",
-    "docs",
+    "programs",
     0,
     0,
     {
-      "sub": 9
+      "multiply.asm": 20,
+      "write.asm": 27,
+      "hello.asm": 15,
+      "count.asm": 11,
+      "mkdir.asm": 19,
+      "pf.asm": 21,
+      "sub.asm": 24,
+      "exec.asm": 13,
+      "busy.asm": 9,
+      "loop.asm": 17,
+      "fork.asm": 14,
+      "ls.asm": 18,
+      "add.asm": 8,
+      "stat.asm": 23,
+      "touch.asm": 25,
+      "tree.asm": 26,
+      "rm.asm": 22,
+      "init.asm": 16,
+      "cat.asm": 10,
+      "divide.asm": 12
     },
     []
   ],
   [
-    0,
-    "Directory",
-    "/",
-    null,
-    0,
-    {
-      "tmp": 3,
-      "bin": 1,
-      "docs": 8,
-      "etc": 4,
-      "examples": 6,
-      "hello.txt": 7,
-      "home": 2,
-      "var": 5
-    },
-    []
-  ],
-  [
-    1,
-    "Directory",
-    "bin",
-    0,
+    24,
+    "File",
+    "sub.asm",
+    7,
     0,
     {},
     []
