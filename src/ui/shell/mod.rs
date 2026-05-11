@@ -184,6 +184,10 @@ impl Shell {
                 let p = if let Some(arg) = command.args.get(0) { self.resolve_path(arg) } else { self.cwd.clone() };
                 self.fork_exec_wait("ls", &[&p])
             }
+            "tree" => {
+                let p = if let Some(arg) = command.args.get(0) { self.resolve_path(arg) } else { self.cwd.clone() };
+                self.fork_exec_wait("tree", &[&p])
+            },
             "mkdir" => {
                 let p = self.resolve_path(command.args.get(0).ok_or("mkdir: missing operand")?);
                 self.fork_exec_wait("mkdir", &[&p])

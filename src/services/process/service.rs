@@ -1436,6 +1436,7 @@ impl ProcessService {
             }
             "fork" => [&mov(0, 100)[..], &int[..], &halt[..]].concat(),
             "exec" => [&mov(0, 101)[..], &int[..], &halt[..]].concat(),
+            "tree" => [&mov(0, 102)[..], &int[..], &halt[..]].concat(),
             _ => vec![0xFF,0x00,0x00,0x00, 0x00,0x00,0x00,0x00],
         }
     }
@@ -1521,7 +1522,39 @@ impl ProcessService {
                 let _ = self.exec_impl(pid, prog, vec![]);
                 // If exec succeeded, CPU was reset. If failed, continue.
             }
+            102 => {
+                // TREE: recursively list directory tree
+                let path = self.read_string_virt(pid, 0x100);
+                let tree = self.build_tree(&path);
+                for line in &tree { println!("{}", line); }
+            }
             _ => {}
+        }
+    }
+
+    fn build_tree(&self, path: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        result.push(path.to_string());
+        self.build_tree_recursive(path, "", &mut result);
+        result
+    }
+
+    fn build_tree_recursive(&self, path: &str, prefix: &str, result: &mut Vec<String>) {
+        if let Ok(rx) = self.bus.send_request(KernelMsg::File(crate::messaging::FileRequest::ListDir { path: path.to_string() })) {
+            if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                if let Some(ResponseData::StringList(entries)) = resp.data() {
+                    let mut entries = entries.clone();
+                    entries.sort();
+                    for (i, entry) in entries.iter().enumerate() {
+                        let is_last = i == entries.len() - 1;
+                        let connector = if is_last { "\u{2514}\u{2500}\u{2500} " } else { "\u{251c}\u{2500}\u{2500} " };
+                        let epath = if path == "/" { format!("/{}", entry) } else { format!("{}/{}", path, entry) };
+                        result.push(format!("{}{}{}", prefix, connector, entry));
+                        let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "\u{2502}   " });
+                        self.build_tree_recursive(&epath, &new_prefix, result);
+                    }
+                }
+            }
         }
     }
 
