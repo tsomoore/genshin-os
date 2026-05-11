@@ -503,11 +503,13 @@ impl ProcessService {
                                             // Already handled via syscall_pending above; skip
                                         }
                                         crate::messaging::Interrupt::PageFault { addr, .. } => {
-                                            let _ = self.bus.send_request(KernelMsg::Memory(
+                                            if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(
                                                 crate::messaging::MemoryRequest::PageFaultHandler {
                                                     pid: cpu.pid(), faulting_addr: *addr,
                                                     access_type: crate::messaging::AccessType::Read,
-                                                }));
+                                                })) {
+                                                let _ = rx.recv_timeout(std::time::Duration::from_millis(100));
+                                            }
                                             cpu.pagefault_pending = false;
                                         }
                                         _ => {}
@@ -1208,7 +1210,7 @@ impl ProcessService {
             self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
                 .insert(pid, Arc::new(Mutex::new(pcb)));
             self.handle_schedule(pid, 1)?;
-            for _ in 0..100 {
+            for _ in 0..500 {
                 if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() { break; } } else { break; }
                 let _ = self.handle_timer_interrupt();
             }
@@ -1255,7 +1257,7 @@ impl ProcessService {
                 self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
                     .insert(pid, Arc::new(Mutex::new(pcb)));
                 self.handle_schedule(pid, 1)?;
-                for _ in 0..100 {
+                for _ in 0..500 {
                     if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() { break; } } else { break; }
                     let _ = self.handle_timer_interrupt();
                 }
@@ -1384,7 +1386,7 @@ impl ProcessService {
             .insert(pid, Arc::new(Mutex::new(pcb)));
         self.handle_schedule(pid, 1)?;
 
-        for _ in 0..100 {
+        for _ in 0..500 {
             if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() { break; } } else { break; }
             let _ = self.handle_timer_interrupt();
         }
