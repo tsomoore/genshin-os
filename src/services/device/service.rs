@@ -111,7 +111,7 @@ impl DeviceService {
                 eprintln!("DeviceService: Hardware failure in {}", component);
             }
             _ => {
-                println!("DeviceService: Received interrupt {:?}", interrupt);
+                // interrupt handled by ProcessService {:?}", interrupt);
             }
         }
         Ok(())

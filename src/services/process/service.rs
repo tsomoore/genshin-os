@@ -854,10 +854,10 @@ impl ProcessService {
         pcb.state = ProcessState::Ready;
         self.process_table.lock().unwrap().insert(child_pid, Arc::new(Mutex::new(pcb)));
 
-        // Parent-child link + schedule
+        // Parent-child link (don't schedule child — exec will do it)
         {Self::lock_mutex(&self.parent_children)?.entry(parent_pid).or_default().push(child_pid);}
-        self.handle_schedule(child_pid, 1)?;
-        vprintln!("PS: Fork {} -> {}", parent_pid, child_pid);
+        // schedule deferred to exec_impl (child may be empty until exec loads code)
+        vprintln!("PS: Fork {} -> {} (unscheduled)", parent_pid, child_pid);
         Ok(child_pid)
     }
 
