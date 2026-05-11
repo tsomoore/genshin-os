@@ -60,7 +60,7 @@ impl FileService {
         let fd_manager = Arc::new(Mutex::new(FileDescriptorManager::new(max_fds_per_process)));
         let open_files = Arc::new(Mutex::new(HashMap::new()));
         let sector_count = (disk_size / 512) as u32;
-        let disk = Arc::new(Mutex::new(VirtualDisk::new(sector_count)));
+        let disk = Arc::new(Mutex::new(VirtualDisk::new(sector_count, ".genshin-disk.img")));
 
         Self {
             bus,

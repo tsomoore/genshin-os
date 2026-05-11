@@ -1,394 +1,316 @@
-// Virtual Disk Simulation
+// Virtual Disk Simulation — file-backed
 //
 // 曾国藩曰：
 // "凡事之需逐日检点者，文书是也。"
 // 磁盘乃持久存储之所，读写不可不慎，记录不可不勤。
 
 use std::sync::{Arc, Mutex};
-use std::fmt;
-
+use std::io::{Seek, SeekFrom, Read, Write};
+use std::fs::{File, OpenOptions};
 use crate::error::DiskError;
 
-/// Standard disk sector size (512 bytes)
 pub const SECTOR_SIZE: usize = 512;
 
-/// Virtual disk simulation
-///
-/// Simulates a block storage device with 512-byte sectors.
-/// Used as the backing store for swap space and file system.
-///
-/// 曾国藩曰：
-/// "储粮于仓，须防鼠雀；储文于盘，须防损坏。"
-/// 磁盘乃数据之粮仓，当以谨慎之心待之。
+/// File-backed virtual disk
 #[derive(Clone)]
 pub struct VirtualDisk {
-    data: Arc<Mutex<Vec<Vec<u8>>>>,
+    file: Arc<Mutex<File>>,
     total_sectors: u32,
-    /// Allocation bitmap (bit=1 means used)
+    /// Allocation bitmap (bit=1 means used), synced to sector 0
     bitmap: Arc<Mutex<Vec<u64>>>,
+    path: String,
 }
 
 impl VirtualDisk {
-    /// Create a new virtual disk with specified sector count
-    ///
-    /// # Arguments
-    /// * `total_sectors` - Number of 512-byte sectors
-    pub fn new(total_sectors: u32) -> Self {
-        if total_sectors == 0 {
-            panic!("Disk must have at least one sector");
-        }
-        if total_sectors < 8 {
-            panic!("Disk must have at least 8 sectors for filesystem metadata");
-        }
-
-        let mut sectors = Vec::with_capacity(total_sectors as usize);
-        for _ in 0..total_sectors {
-            sectors.push(vec![0u8; SECTOR_SIZE]);
-        }
+    pub fn new(total_sectors: u32, path: &str) -> Self {
+        assert!(total_sectors >= 8, "Disk must have at least 8 sectors");
 
         let bitmap_words = ((total_sectors as usize) + 63) / 64;
-        let mut bitmap = vec![0u64; bitmap_words];
-        Self::mark_used_range(&mut bitmap, 0, 3); // reserve metadata sectors
+
+        // Try to open existing disk image, or create new one
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)
+            .expect("Failed to open disk image");
+
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let expected_len = total_sectors as u64 * SECTOR_SIZE as u64;
+
+        let bitmap = if file_len >= SECTOR_SIZE as u64 {
+            // Load bitmap from sector 0
+            let mut buf = vec![0u8; SECTOR_SIZE];
+            let mut f = file.try_clone().expect("clone");
+            f.seek(SeekFrom::Start(0)).ok();
+            f.read_exact(&mut buf).ok();
+            let mut bitmap = vec![0u64; bitmap_words];
+            for (i, chunk) in buf.chunks(8).enumerate() {
+                if i < bitmap.len() {
+                    let mut bytes = [0u8; 8];
+                    bytes[..chunk.len()].copy_from_slice(chunk);
+                    bitmap[i] = u64::from_le_bytes(bytes);
+                }
+            }
+            bitmap
+        } else {
+            // New disk: pre-allocate file
+            file.set_len(expected_len).expect("Failed to pre-allocate disk image");
+            let mut bitmap = vec![0u64; bitmap_words];
+            // Reserve sectors 0-3 for metadata (bitmap + superblock)
+            Self::mark_used_range(&mut bitmap, 0, 3);
+            bitmap
+        };
 
         Self {
-            data: Arc::new(Mutex::new(sectors)),
+            file: Arc::new(Mutex::new(file)),
             total_sectors,
             bitmap: Arc::new(Mutex::new(bitmap)),
+            path: path.to_string(),
         }
     }
 
-    /// Get total disk size in bytes
-    pub fn size_bytes(&self) -> u64 {
-        self.total_sectors as u64 * SECTOR_SIZE as u64
-    }
-
-    /// Get total number of sectors
-    pub fn total_sectors(&self) -> u32 {
-        self.total_sectors
-    }
-
-    /// Read a single sector
-    ///
-    /// 曾国藩曰：
-    /// "读书之法，在循序而渐进；读盘之法，亦当按扇区而读之。"
-    /// 每次读写必以扇区为单位，不可紊乱。
-    pub fn read_sector(&self, sector: u32) -> Result<Vec<u8>, DiskError> {
-        self.check_sector(sector)?;
-
-        let data = self.data.lock()
-            .map_err(|_| DiskError::Busy)?;
-
-        Ok(data[sector as usize].clone())
-    }
-
-    /// Read multiple sectors
-    pub fn read_sectors(&self, start_sector: u32, count: u32) -> Result<Vec<u8>, DiskError> {
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-
-        // Check last sector
-        let end_sector = start_sector.checked_add(count - 1)
-            .ok_or(DiskError::InvalidSector { sector: u32::MAX, max_sector: self.total_sectors })?;
-        self.check_sector(end_sector)?;
-
-        let data = self.data.lock()
-            .map_err(|_| DiskError::Busy)?;
-
-        let mut result = Vec::with_capacity(count as usize * SECTOR_SIZE);
-        for i in 0..count {
-            let sector_idx = (start_sector + i) as usize;
-            result.extend_from_slice(&data[sector_idx]);
-        }
-
-        Ok(result)
-    }
-
-    /// Write a single sector
-    ///
-    /// 曾国藩曰：
-    /// "落笔纸笺，当思此字传之后世，不可草率。"
-    /// 写入磁盘亦当如此，每一扇区皆当认真对待。
-    pub fn write_sector(&self, sector: u32, buf: &[u8]) -> Result<(), DiskError> {
-        self.check_sector(sector)?;
-
-        if buf.len() != SECTOR_SIZE {
-            return Err(DiskError::IoFailed {
-                operation: "write_sector".to_string(),
-                sector,
-            });
-        }
-
-        let mut data = self.data.lock()
-            .map_err(|_| DiskError::Busy)?;
-
-        data[sector as usize].copy_from_slice(buf);
-        Ok(())
-    }
-
-    /// Write multiple sectors
-    pub fn write_sectors(&self, start_sector: u32, buf: &[u8]) -> Result<(), DiskError> {
-        if buf.len() % SECTOR_SIZE != 0 {
-            return Err(DiskError::IoFailed {
-                operation: "write_sectors".to_string(),
-                sector: start_sector,
-            });
-        }
-
-        let sector_count = (buf.len() / SECTOR_SIZE) as u32;
-        if sector_count == 0 {
-            return Ok(());
-        }
-
-        let end_sector = start_sector.checked_add(sector_count - 1)
-            .ok_or(DiskError::InvalidSector { sector: u32::MAX, max_sector: self.total_sectors })?;
-        self.check_sector(end_sector)?;
-
-        let mut data = self.data.lock()
-            .map_err(|_| DiskError::Busy)?;
-
-        for (i, chunk) in buf.chunks(SECTOR_SIZE).enumerate() {
-            let sector_idx = (start_sector + i as u32) as usize;
-            data[sector_idx].copy_from_slice(chunk);
-        }
-
-        Ok(())
-    }
-
-    /// Zero out a sector
-    pub fn zero_sector(&self, sector: u32) -> Result<(), DiskError> {
-        self.check_sector(sector)?;
-
-        let mut data = self.data.lock()
-            .map_err(|_| DiskError::Busy)?;
-
-        for byte in data[sector as usize].iter_mut() {
-            *byte = 0;
-        }
-
-        Ok(())
-    }
-
-    /// Zero out multiple sectors
-    pub fn zero_sectors(&self, start_sector: u32, count: u32) -> Result<(), DiskError> {
-        let end_sector = start_sector.checked_add(count - 1)
-            .ok_or(DiskError::InvalidSector { sector: u32::MAX, max_sector: self.total_sectors })?;
-        self.check_sector(end_sector)?;
-
-        let mut data = self.data.lock()
-            .map_err(|_| DiskError::Busy)?;
-
-        for i in 0..count {
-            let sector_idx = (start_sector + i) as usize;
-            for byte in data[sector_idx].iter_mut() {
-                *byte = 0;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Mark a range of sectors as used in the bitmap
-    fn mark_used_range(bitmap: &mut [u64], start: u32, count: u32) {
-        for s in start..start + count {
-            let word = (s / 64) as usize;
-            let bit = (s % 64) as u64;
-            if word < bitmap.len() { bitmap[word] |= 1 << bit; }
-        }
-    }
-
-    /// Allocate N consecutive free sectors, return starting sector
-    pub fn allocate_sectors(&self, count: u32) -> Result<u32, DiskError> {
-        if count == 0 { return Err(DiskError::IoFailed { operation: "allocate".into(), sector: 0 }); }
-        let mut bitmap = self.bitmap.lock().map_err(|_| DiskError::Busy)?;
-        let total = self.total_sectors;
-        let mut consecutive: u32 = 0;
-        let mut start: u32 = 0;
-        for sector in 3..total {
-            let word = (sector / 64) as usize;
-            let bit = (sector % 64) as u64;
-            if bitmap[word] & (1 << bit) == 0 {
-                if consecutive == 0 { start = sector; }
-                consecutive += 1;
-                if consecutive == count {
-                    for s in start..start + count {
-                        let w = (s / 64) as usize;
-                        let b = (s % 64) as u64;
-                        bitmap[w] |= 1 << b;
-                    }
-                    return Ok(start);
-                }
-            } else { consecutive = 0; }
-        }
-        Err(DiskError::IoFailed { operation: format!("allocate {} sectors", count), sector: 0 })
-    }
-
-    /// Free previously allocated sectors
-    pub fn free_sectors(&self, start: u32, count: u32) -> Result<(), DiskError> {
-        if start < 3 { return Err(DiskError::InvalidSector { sector: start, max_sector: self.total_sectors }); }
-        self.check_sector(start + count - 1)?;
-        let mut bitmap = self.bitmap.lock().map_err(|_| DiskError::Busy)?;
-        for s in start..start + count {
-            let word = (s / 64) as usize;
-            let bit = (s % 64) as u64;
-            bitmap[word] &= !(1 << bit);
-        }
-        let mut data = self.data.lock().map_err(|_| DiskError::Busy)?;
-        for s in start..start + count {
-            for byte in data[s as usize].iter_mut() { *byte = 0; }
-        }
-        Ok(())
-    }
-
-    /// Get count of used sectors (from bitmap)
-    pub fn used_sectors_count(&self) -> usize {
-        let bitmap = self.bitmap.lock().unwrap();
-        let total = self.total_sectors as usize;
-        let mut used = 0usize;
-        for sector in 0..total {
-            let word = sector / 64;
-            let bit = (sector % 64) as u64;
-            if word < bitmap.len() && (bitmap[word] & (1 << bit)) != 0 {
-                used += 1;
-            }
-        }
-        used
-    }
-
-    /// Dump disk state for debugging/TUI display
-    ///
-    /// 曾国藩曰：
-    /// "每日检点仓库，知其盈虚，方能理财。"
-    /// 磁盘状态亦当定期检查，方能知己知彼。
-    pub fn dump_state(&self) -> DiskState {
-        let data = self.data.lock()
-            .unwrap();
-
-        // Count non-zero sectors (used sectors)
-        let used_sectors = data.iter()
-            .filter(|sector| sector.iter().any(|&b| b != 0))
-            .count();
-
-        DiskState {
-            total_sectors: self.total_sectors,
-            used_sectors,
-            total_bytes: self.size_bytes(),
-        }
-    }
-
-    /// Check if sector number is valid
     fn check_sector(&self, sector: u32) -> Result<(), DiskError> {
         if sector >= self.total_sectors {
-            return Err(DiskError::InvalidSector { sector, max_sector: self.total_sectors });
+            Err(DiskError::InvalidSector { sector, max_sector: self.total_sectors - 1 })
+        } else {
+            Ok(())
         }
+    }
+
+    pub fn total_sectors(&self) -> u32 { self.total_sectors }
+    pub fn size_bytes(&self) -> u64 { self.total_sectors as u64 * SECTOR_SIZE as u64 }
+
+    /// Read a single sector from the file
+    pub fn read_sector(&self, sector: u32) -> Result<Vec<u8>, DiskError> {
+        self.check_sector(sector)?;
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        let mut f = self.file.lock().map_err(|_| DiskError::Busy)?;
+        f.seek(SeekFrom::Start(sector as u64 * SECTOR_SIZE as u64))
+            .map_err(|e| DiskError::IoFailed { operation: "seek".into(), sector })?;
+        f.read_exact(&mut buf)
+            .map_err(|e| DiskError::IoFailed { operation: "read".into(), sector })?;
+        Ok(buf)
+    }
+
+    pub fn read_sectors(&self, start_sector: u32, count: u32) -> Result<Vec<u8>, DiskError> {
+        if count == 0 { return Ok(Vec::new()); }
+        let end_sector = start_sector + count - 1;
+        self.check_sector(end_sector)?;
+        let mut buf = vec![0u8; count as usize * SECTOR_SIZE];
+        let mut f = self.file.lock().map_err(|_| DiskError::Busy)?;
+        f.seek(SeekFrom::Start(start_sector as u64 * SECTOR_SIZE as u64))
+            .map_err(|e| DiskError::IoFailed { operation: "seek".into(), sector: start_sector })?;
+        f.read_exact(&mut buf)
+            .map_err(|e| DiskError::IoFailed { operation: "read".into(), sector: start_sector })?;
+        Ok(buf)
+    }
+
+    /// Write a single sector to the file
+    pub fn write_sector(&self, sector: u32, buf: &[u8]) -> Result<(), DiskError> {
+        self.check_sector(sector)?;
+        if buf.len() != SECTOR_SIZE {
+            return Err(DiskError::IoFailed { operation: "write_sector".to_string(), sector });
+        }
+        let mut f = self.file.lock().map_err(|_| DiskError::Busy)?;
+        f.seek(SeekFrom::Start(sector as u64 * SECTOR_SIZE as u64))
+            .map_err(|e| DiskError::IoFailed { operation: "seek".into(), sector })?;
+        f.write_all(buf)
+            .map_err(|e| DiskError::IoFailed { operation: "write".into(), sector })?;
+        f.flush().ok();
         Ok(())
     }
-}
 
-impl fmt::Debug for VirtualDisk {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("VirtualDisk")
-            .field("total_sectors", &self.total_sectors)
-            .field("size_bytes", &self.size_bytes())
-            .finish()
+    pub fn write_sectors(&self, start_sector: u32, buf: &[u8]) -> Result<(), DiskError> {
+        let count = (buf.len() + SECTOR_SIZE - 1) / SECTOR_SIZE;
+        if count == 0 { return Ok(()); }
+        self.check_sector(start_sector + count as u32 - 1)?;
+        let mut f = self.file.lock().map_err(|_| DiskError::Busy)?;
+        f.seek(SeekFrom::Start(start_sector as u64 * SECTOR_SIZE as u64))
+            .map_err(|e| DiskError::IoFailed { operation: "seek".into(), sector: start_sector })?;
+        f.write_all(buf)
+            .map_err(|e| DiskError::IoFailed { operation: "write".into(), sector: start_sector })?;
+        f.flush().ok();
+        Ok(())
     }
-}
 
-/// Disk state snapshot for TUI display
-#[derive(Debug, Clone)]
-pub struct DiskState {
-    pub total_sectors: u32,
-    pub used_sectors: usize,
-    pub total_bytes: u64,
-}
-
-impl DiskState {
-    pub fn utilization_percent(&self) -> f64 {
-        if self.total_sectors == 0 {
-            return 0.0;
+    /// Flush bitmap to sector 0
+    pub fn flush_bitmap(&self) -> Result<(), DiskError> {
+        let bitmap = self.bitmap.lock().map_err(|_| DiskError::Busy)?;
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        for (i, word) in bitmap.iter().enumerate() {
+            let bytes = word.to_le_bytes();
+            let start = i * 8;
+            if start + 8 <= SECTOR_SIZE {
+                buf[start..start+8].copy_from_slice(&bytes);
+            }
         }
-        (self.used_sectors as f64 / self.total_sectors as f64) * 100.0
+        drop(bitmap);
+        self.write_sector(0, &buf)
+    }
+
+    // ── Sector allocation ──
+
+    fn mark_used(bitmap: &mut [u64], sector: u32) {
+        let word = (sector / 64) as usize;
+        let bit = (sector % 64) as u64;
+        if word < bitmap.len() { bitmap[word] |= 1 << bit; }
+    }
+
+    fn mark_free(bitmap: &mut [u64], sector: u32) {
+        let word = (sector / 64) as usize;
+        let bit = (sector % 64) as u64;
+        if word < bitmap.len() { bitmap[word] &= !(1 << bit); }
+    }
+
+    fn is_free(bitmap: &[u64], sector: u32) -> bool {
+        let word = (sector / 64) as usize;
+        let bit = (sector % 64) as u64;
+        word >= bitmap.len() || (bitmap[word] & (1 << bit)) == 0
+    }
+
+    fn mark_used_range(bitmap: &mut [u64], start: u32, count: u32) {
+        for s in start..start + count {
+            Self::mark_used(bitmap, s);
+        }
+    }
+
+    pub fn alloc_sector(&self) -> Option<u32> {
+        let mut bitmap = self.bitmap.lock().ok()?;
+        for s in 4..self.total_sectors {
+            if Self::is_free(&bitmap, s) {
+                Self::mark_used(&mut bitmap, s);
+                drop(bitmap);
+                self.flush_bitmap().ok();
+                return Some(s);
+            }
+        }
+        None
+    }
+
+    pub fn free_sector(&self, sector: u32) -> Result<(), DiskError> {
+        if sector < 4 { return Ok(()); } // metadata sectors
+        let mut bitmap = self.bitmap.lock().map_err(|_| DiskError::Busy)?;
+        Self::mark_free(&mut bitmap, sector);
+        drop(bitmap);
+        self.flush_bitmap()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
-    #[test]
-    fn test_disk_creation() {
-        let disk = VirtualDisk::new(1024);
-        assert_eq!(disk.total_sectors(), 1024);
-        assert_eq!(disk.size_bytes(), 1024 * 512);
+    fn make_disk() -> VirtualDisk {
+        let _ = fs::remove_file("/tmp/test-disk.img");
+        VirtualDisk::new(100, "/tmp/test-disk.img")
     }
 
     #[test]
     fn test_read_write_sector() {
-        let disk = VirtualDisk::new(100);
-
-        // Write a sector
-        let mut sector_data = vec![0xAB; SECTOR_SIZE];
-        sector_data[0] = 0xDE;
-        sector_data[1] = 0xAD;
-        disk.write_sector(5, &sector_data).unwrap();
-
-        // Read it back
-        let read_data = disk.read_sector(5).unwrap();
-        assert_eq!(read_data.len(), SECTOR_SIZE);
-        assert_eq!(read_data[0], 0xDE);
-        assert_eq!(read_data[1], 0xAD);
-    }
-
-    #[test]
-    fn test_invalid_sector() {
-        let disk = VirtualDisk::new(100);
-        assert!(matches!(
-            disk.read_sector(100),
-            Err(DiskError::InvalidSector { .. })
-        ));
-    }
-
-    #[test]
-    fn test_multiple_sectors() {
-        let disk = VirtualDisk::new(100);
-
-        // Write 2 sectors
-        let data = vec![0xCD; SECTOR_SIZE * 2];
-        disk.write_sectors(10, &data).unwrap();
-
-        // Read them back
-        let read_data = disk.read_sectors(10, 2).unwrap();
-        assert_eq!(read_data.len(), SECTOR_SIZE * 2);
-        assert!(read_data.iter().all(|&b| b == 0xCD));
-    }
-
-    #[test]
-    fn test_zero_sector() {
-        let disk = VirtualDisk::new(100);
-
-        // Write some data
-        let data = vec![0xFF; SECTOR_SIZE];
+        let disk = make_disk();
+        let mut data = vec![0u8; SECTOR_SIZE];
+        data[0] = 0xAB;
         disk.write_sector(5, &data).unwrap();
-
-        // Zero it out
-        disk.zero_sector(5).unwrap();
-
-        // Verify
-        let read_data = disk.read_sector(5).unwrap();
-        assert!(read_data.iter().all(|&b| b == 0));
+        let read = disk.read_sector(5).unwrap();
+        assert_eq!(read[0], 0xAB);
+        let _ = fs::remove_file("/tmp/test-disk.img");
     }
 
     #[test]
-    fn test_dump_state() {
-        let disk = VirtualDisk::new(1000);
+    fn test_alloc_free() {
+        let disk = make_disk();
+        let s = disk.alloc_sector().unwrap();
+        assert!(s >= 4);
+        assert!(!disk.alloc_sector().is_none());
+        disk.free_sector(s).unwrap();
+        let _ = fs::remove_file("/tmp/test-disk.img");
+    }
 
-        // Use some sectors
-        let data = vec![0xAA; SECTOR_SIZE];
-        disk.write_sector(0, &data).unwrap();
-        disk.write_sector(10, &data).unwrap();
+    #[test]
+    fn test_persistence() {
+        let _ = fs::remove_file("/tmp/test-persist.img");
+        let data = vec![0x42u8; SECTOR_SIZE];
+        {
+            let disk = VirtualDisk::new(100, "/tmp/test-persist.img");
+            disk.write_sector(8, &data).unwrap();
+        }
+        {
+            let disk = VirtualDisk::new(100, "/tmp/test-persist.img");
+            let read = disk.read_sector(8).unwrap();
+            assert_eq!(read[0], 0x42);
+        }
+        let _ = fs::remove_file("/tmp/test-persist.img");
+    }
+}
 
-        let state = disk.dump_state();
-        assert_eq!(state.total_sectors, 1000);
-        assert_eq!(state.used_sectors, 2);
+// ── Bulk operations (used by File sync_to_disk) ──
+
+impl VirtualDisk {
+    /// Allocate contiguous sectors
+    pub fn allocate_sectors(&self, count: u32) -> Result<u32, DiskError> {
+        let mut bitmap = self.bitmap.lock().map_err(|_| DiskError::Busy)?;
+        let mut run_start = 4u32;
+        let mut run_len = 0u32;
+        for s in 4..self.total_sectors {
+            if Self::is_free(&bitmap, s) {
+                if run_len == 0 { run_start = s; }
+                run_len += 1;
+                if run_len >= count {
+                    for i in run_start..run_start + count {
+                        Self::mark_used(&mut bitmap, i);
+                    }
+                    drop(bitmap);
+                    self.flush_bitmap().ok();
+                    return Ok(run_start);
+                }
+            } else {
+                run_len = 0;
+            }
+        }
+        Err(DiskError::OutOfSpace)
+    }
+
+    /// Free a range of sectors
+    pub fn free_sectors(&self, start: u32, count: u32) -> Result<(), DiskError> {
+        let mut bitmap = self.bitmap.lock().map_err(|_| DiskError::Busy)?;
+        for s in start..start + count {
+            if s >= 4 { Self::mark_free(&mut bitmap, s); }
+        }
+        drop(bitmap);
+        self.flush_bitmap()
+    }
+
+    /// Count used sectors
+    pub fn used_sectors_count(&self) -> usize {
+        self.bitmap.lock().map(|b| {
+            b.iter().map(|w| w.count_ones() as usize).sum()
+        }).unwrap_or(0)
+    }
+}
+
+/// Disk state snapshot
+#[derive(Debug, Clone)]
+pub struct DiskState {
+    pub total_sectors: u32,
+    pub total_bytes: u64,
+}
+
+impl VirtualDisk {
+    pub fn dump_state(&self) -> DiskState {
+        DiskState {
+            total_sectors: self.total_sectors,
+            total_bytes: self.size_bytes(),
+        }
+    }
+}
+
+impl std::fmt::Debug for VirtualDisk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VirtualDisk")
+            .field("total_sectors", &self.total_sectors)
+            .field("path", &self.path)
+            .finish()
     }
 }

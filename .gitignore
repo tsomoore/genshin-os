@@ -1,2 +1,4 @@
 /target
 .genshin-vfs.json
+.genshin-disk.img
+.genshin-swap.img

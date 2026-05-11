@@ -197,9 +197,11 @@ pub enum DiskError {
 
     /// Disk is busy
     Busy,
-
     /// Disk is not ready
     NotReady,
+
+    /// No free space left
+    OutOfSpace,
 }
 
 impl fmt::Display for DiskError {
@@ -213,6 +215,7 @@ impl fmt::Display for DiskError {
             }
             Self::Busy => write!(f, "Disk is busy"),
             Self::NotReady => write!(f, "Disk is not ready"),
+            Self::OutOfSpace => write!(f, "Disk out of space"),
         }
     }
 }

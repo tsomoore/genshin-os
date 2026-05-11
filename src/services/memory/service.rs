@@ -63,7 +63,7 @@ impl MemoryService {
         let size = hw.size();
         let memory_manager = Arc::new(Mutex::new(PhysicalMemoryManager::new(size, 4096)));
         let page_tables = Arc::new(Mutex::new(PageTableManager::new(4096, 256)));
-        let swap_disk = VirtualDisk::new(256); // 256 sectors for swap (128KB)
+        let swap_disk = VirtualDisk::new(256, ".genshin-swap.img"); // 256 sectors for swap (128KB)
         let swap_manager = Arc::new(Mutex::new(SwapManager::new(SwapConfig::default(), swap_disk)));
         let hardware_memory = Arc::new(Mutex::new(hw));
         Self { bus, receiver, memory_manager, page_tables, swap_manager, hardware_memory, mmu }
