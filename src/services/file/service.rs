@@ -1,3 +1,4 @@
+use crate::vprintln;
 // File Service - Main file management service
 //
 // 曾国藩曰：
@@ -135,7 +136,7 @@ impl FileService {
                     }
                 }
             }
-            println!("FileService: imported {}", fname);
+            vprintln!("FileService: imported {}", fname);
         }
     }
 
@@ -239,16 +240,16 @@ impl FileService {
 
             FileRequest::ReadDirectory { dir_fd } => {
                 // TODO: Implement read directory entries
-                println!("FileService: Read directory entries for fd {}", dir_fd);
+                vprintln!("FileService: Read directory entries for fd {}", dir_fd);
             }
 
             FileRequest::CloseDirectory { dir_fd } => {
                 // TODO: Implement close directory
-                println!("FileService: Close directory fd {}", dir_fd);
+                vprintln!("FileService: Close directory fd {}", dir_fd);
             }
 
             _ => {
-                println!("FileService: Unhandled file request");
+                vprintln!("FileService: Unhandled file request");
             }
         }
 
@@ -337,7 +338,7 @@ impl FileService {
             }
 
             _ => {
-                println!("FileService: Unhandled file request");
+                vprintln!("FileService: Unhandled file request");
                 let _ = envelope.respond_success(ResponseData::Void);
             }
         }
@@ -440,7 +441,7 @@ impl FileService {
         let mut fd_manager = Self::lock_mutex(&self.fd_manager)?;
         let fd = fd_manager.allocate(pid, file, 0)?; // TODO: Convert flags to u32
 
-        println!("FileService: Opened file {} for pid {}, fd={}", path, pid, fd);
+        vprintln!("FileService: Opened file {} for pid {}, fd={}", path, pid, fd);
 
         // TODO: Send response with fd
         Ok(())
@@ -566,7 +567,7 @@ impl FileService {
         let mut fd_manager = Self::lock_mutex(&self.fd_manager)?;
         let fd = fd_manager.allocate(pid, file, 0)?; // TODO: Convert flags to u32
 
-        println!("FileService: Opened file {} for pid {}, fd={}", path, pid, fd);
+        vprintln!("FileService: Opened file {} for pid {}, fd={}", path, pid, fd);
 
         // Send response with fd
         let _ = envelope.respond_success(ResponseData::Fd(fd));
@@ -577,7 +578,7 @@ impl FileService {
         let mut fd_manager = Self::lock_mutex(&self.fd_manager)?;
         fd_manager.close(pid, fd)?;
 
-        println!("FileService: Closed fd {} for pid {}", fd, pid);
+        vprintln!("FileService: Closed fd {} for pid {}", fd, pid);
         Ok(())
     }
 
@@ -598,7 +599,7 @@ impl FileService {
                     if let Err(e) = file.sync_to_disk(&disk_guard) {
                         eprintln!("FileService: sync failed for fd {}: {}", fd, e);
                     }
-                    println!("FileService: Synced fd {} to disk ({} sectors, start={:?})",
+                    vprintln!("FileService: Synced fd {} to disk ({} sectors, start={:?})",
                         fd, file.sector_count, file.start_sector);
                 }
             }
@@ -607,7 +608,7 @@ impl FileService {
         let mut fd_manager = Self::lock_mutex(&self.fd_manager)?;
         fd_manager.close(pid, fd)?;
 
-        println!("FileService: Closed fd {} for pid {}", fd, pid);
+        vprintln!("FileService: Closed fd {} for pid {}", fd, pid);
         let _ = envelope.respond_success(ResponseData::Void);
         Ok(())
     }
@@ -623,7 +624,7 @@ impl FileService {
 
         let data = open_file.read(count)?;
 
-        println!("FileService: Read {} bytes from fd {} for pid {}", data.len(), fd, pid);
+        vprintln!("FileService: Read {} bytes from fd {} for pid {}", data.len(), fd, pid);
 
         // TODO: Send response with data
         Ok(())
@@ -646,7 +647,7 @@ impl FileService {
 
         let data = open_file.read(count)?;
 
-        println!("FileService: Read {} bytes from fd {} for pid {}", data.len(), fd, pid);
+        vprintln!("FileService: Read {} bytes from fd {} for pid {}", data.len(), fd, pid);
 
         // Send response with actual data
         let _ = envelope.respond_success(ResponseData::Bytes(data));
@@ -681,7 +682,7 @@ impl FileService {
             }
         }
 
-        println!("FileService: Wrote {} bytes to fd {} for pid {}", written, fd, pid);
+        vprintln!("FileService: Wrote {} bytes to fd {} for pid {}", written, fd, pid);
 
         Ok(())
     }
@@ -720,7 +721,7 @@ impl FileService {
             }
         }
 
-        println!("FileService: Wrote {} bytes to fd {} for pid {}", written, fd, pid);
+        vprintln!("FileService: Wrote {} bytes to fd {} for pid {}", written, fd, pid);
 
         // Send response with bytes written
         let _ = envelope.respond_success(ResponseData::BytesProcessed(written));
@@ -753,7 +754,7 @@ impl FileService {
 
         open_file.seek(new_position)?;
 
-        println!("FileService: Seeked fd {} to position {} for pid {}", fd, new_position, pid);
+        vprintln!("FileService: Seeked fd {} to position {} for pid {}", fd, new_position, pid);
 
         // TODO: Send response with new position
         Ok(())
@@ -783,7 +784,7 @@ impl FileService {
         // Create file
         let inode = vfs.create_file(parent_inode, file_name, pid)?;
 
-        println!("FileService: Created file {} (inode {}) for pid {}", path, inode, pid);
+        vprintln!("FileService: Created file {} (inode {}) for pid {}", path, inode, pid);
 
         // TODO: Send response with inode
         Ok(())
@@ -800,7 +801,7 @@ impl FileService {
 
         vfs.delete(inode)?;
 
-        println!("FileService: Deleted file {} for pid {}", path, pid);
+        vprintln!("FileService: Deleted file {} for pid {}", path, pid);
 
         // TODO: Send response
         Ok(())
@@ -812,7 +813,7 @@ impl FileService {
         let node = vfs.lookup_path(&path)?;
         let node = Self::lock_mutex(&node)?;
 
-        println!("FileService: Stat file {} for pid {}: size={}", path, pid, node.size);
+        vprintln!("FileService: Stat file {} for pid {}: size={}", path, pid, node.size);
 
         // TODO: Send response with metadata
         Ok(())
@@ -842,7 +843,7 @@ impl FileService {
         // Create directory
         let inode = vfs.create_directory(parent_inode, dir_name, pid)?;
 
-        println!("FileService: Created directory {} (inode {}) for pid {}", path, inode, pid);
+        vprintln!("FileService: Created directory {} (inode {}) for pid {}", path, inode, pid);
 
         // TODO: Send response with inode
         Ok(())
@@ -873,7 +874,7 @@ impl FileService {
 
         vfs.delete(inode)?;
 
-        println!("FileService: Removed directory {} for pid {}", path, pid);
+        vprintln!("FileService: Removed directory {} for pid {}", path, pid);
 
         // TODO: Send response
         Ok(())
@@ -894,7 +895,7 @@ impl FileService {
 
         let entries = node.list_children();
 
-        println!("FileService: Listed directory {} for pid {}: {} entries", path, pid, entries.len());
+        vprintln!("FileService: Listed directory {} for pid {}: {} entries", path, pid, entries.len());
 
         // TODO: Send response with entries
         Ok(())
@@ -912,7 +913,7 @@ impl FileService {
         }
         let mut entries: Vec<String> = node.children.keys().cloned().collect();
         entries.sort();
-        println!("FileService: Listed {} for pid {}: {} entries", path, pid, entries.len());
+        vprintln!("FileService: Listed {} for pid {}: {} entries", path, pid, entries.len());
         Ok(entries)
     }
 
@@ -923,7 +924,7 @@ impl FileService {
         let mut fd_manager = Self::lock_mutex(&self.fd_manager)?;
         let new_fd = fd_manager.dup(pid, old_fd)?;
 
-        println!("FileService: Duplicated fd {} to {} for pid {}", old_fd, new_fd, pid);
+        vprintln!("FileService: Duplicated fd {} to {} for pid {}", old_fd, new_fd, pid);
 
         // TODO: Send response with new_fd
         Ok(())
@@ -931,7 +932,7 @@ impl FileService {
 
     fn handle_dup2(&self, pid: Pid, old_fd: Fd, new_fd: Fd) -> GenshinResult<()> {
         // TODO: Implement dup2 (duplicate to specific fd)
-        println!("FileService: Dup2 fd {} to {} for pid {}", old_fd, new_fd, pid);
+        vprintln!("FileService: Dup2 fd {} to {} for pid {}", old_fd, new_fd, pid);
 
         // TODO: Send response
         Ok(())
