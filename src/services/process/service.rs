@@ -1310,6 +1310,8 @@ impl ProcessService {
                 prog.extend_from_slice(&halt);
                 prog
             }
+            "fork" => [&mov(0, 100)[..], &int[..], &halt[..]].concat(),
+            "exec" => [&mov(0, 101)[..], &int[..], &halt[..]].concat(),
             _ => vec![0xFF,0x00,0x00,0x00, 0x00,0x00,0x00,0x00],
         }
     }
@@ -1376,6 +1378,20 @@ impl ProcessService {
                         }
                     }
                 }
+            }
+            // ========== Process syscalls (triggered by CPU INT) ==========
+            100 => {
+                // FORK: clone current process, child gets R0=0, parent gets R0=child_pid
+                match self.fork_impl(pid) {
+                    Ok(child_pid) => { cpu.write_register(crate::hardware::Register::R0, child_pid); }
+                    Err(_) => { cpu.write_register(crate::hardware::Register::R0, 0); }
+                }
+            }
+            101 => {
+                // EXEC: replace current process with program at 0x100
+                let prog = self.read_string_virt(pid, 0x100);
+                let _ = self.exec_impl(pid, prog, vec![]);
+                // If exec succeeded, CPU was reset. If failed, continue.
             }
             _ => {}
         }

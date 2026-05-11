@@ -238,11 +238,20 @@ impl Shell {
             }
             "fork" => {
                 let pid: u64 = command.args.get(0).and_then(|s| s.parse().ok()).unwrap_or(1);
+                // Load fork program into PID, let CPU execute it → INT 0x80 → handle_file_syscall(100) → fork_impl
+                let msg = KernelMsg::Process(ProcessRequest::ExecProcess { pid, executable: "fork".into(), args: vec![] });
+                let _ = self.send_and_wait(msg)?;
+                println!("fork: PID {} now runs fork program via CPU", pid);
+                Ok(())
+            }
+            "fork2" => {
+                // Legacy: direct bus request (bypasses CPU)
+                let pid: u64 = command.args.get(0).and_then(|s| s.parse().ok()).unwrap_or(1);
                 let msg = KernelMsg::Process(ProcessRequest::ForkProcess { parent_pid: pid });
                 match self.send_and_wait(msg) {
                     Ok(r) => {
-                        if r.is_error() { eprintln!("fork: {}", r.service_error().unwrap()); }
-                        else if let Some(ResponseData::Pid(c)) = r.data() { println!("fork: child PID = {}", c); }
+                        if !r.is_error() { if let Some(ResponseData::Pid(c)) = r.data() { println!("fork: child PID = {}", c); } }
+                        else { eprintln!("fork: {}", r.service_error().unwrap()); }
                     }
                     Err(e) => eprintln!("fork: {}", e),
                 }
