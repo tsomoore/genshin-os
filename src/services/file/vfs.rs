@@ -398,7 +398,7 @@ impl VirtualFileSystem {
                 parent: *parent, permissions: 0o644, owner: 0,
                 size: *size, created: 0, modified: 0,
                 blocks: Vec::new(), children: HashMap::new(),
-                ref_count: 1, deleted: false,
+                ref_count: 0, deleted: false,
             }));
             vfs.nodes.insert(*inode, node);
             if *inode >= vfs.next_inode { vfs.next_inode = *inode + 1; }
