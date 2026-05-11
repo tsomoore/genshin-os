@@ -14,6 +14,9 @@ const OP_DIV: u8 = 0x05;
 const OP_LOAD: u8 = 0x06;
 const OP_STORE: u8 = 0x07;
 const OP_JMP: u8 = 0x10;
+const OP_CMP: u8 = 0x11;
+const OP_JZ:  u8 = 0x12;
+const OP_JNZ: u8 = 0x13;
 const OP_INT: u8 = 0x80;
 const OP_HALT: u8 = 0xFF;
 
@@ -109,6 +112,33 @@ fn parse_line(line: &str, line_num: usize) -> Option<Vec<u8>> {
             }
             let addr = parse_immediate(parts[1])?;
             Some(encode(OP_JMP, 0, SRC_IMM, addr))
+        }
+
+        "CMP" | "ADD" | "SUB" | "MUL" | "DIV" => {
+            // CMP is parsed same as arithmetic: CMP dst, src
+            if parts.len() < 3 {
+                eprintln!("  asm:{}: {} requires 2 operands", line_num, mnemonic);
+                return None;
+            }
+            let dst = reg_index(parts[1].trim_end_matches(','))?;
+            let (src_type, value) = parse_operand(parts[2])?;
+            let opcode = match mnemonic.as_str() {
+                "CMP" => OP_CMP,
+                _ => unreachable!(),
+            };
+            Some(encode(opcode, dst, src_type, value))
+        }
+
+        "JZ" | "JE" => {
+            if parts.len() < 2 { eprintln!("  asm:{}: {} requires an address", line_num, mnemonic); return None; }
+            let addr = parse_immediate(parts[1])?;
+            Some(encode(OP_JZ, 0, SRC_IMM, addr))
+        }
+
+        "JNZ" | "JNE" => {
+            if parts.len() < 2 { eprintln!("  asm:{}: {} requires an address", line_num, mnemonic); return None; }
+            let addr = parse_immediate(parts[1])?;
+            Some(encode(OP_JNZ, 0, SRC_IMM, addr))
         }
 
         "LOAD" => {

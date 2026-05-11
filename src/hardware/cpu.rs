@@ -166,6 +166,21 @@ pub enum Instruction {
         src: Register,
         addr: Operand,
     },
+    /// CMP dst, src — compare, set flags (like SUB but no store)
+    Cmp {
+        dst: Register,
+        src: Operand,
+    },
+
+    /// JZ addr — jump if zero flag set
+    Jz {
+        addr: VirtAddr,
+    },
+
+    /// JNZ addr — jump if zero flag clear
+    Jnz {
+        addr: VirtAddr,
+    },
 
     /// HALT - Stop execution
     Halt,
@@ -190,6 +205,9 @@ impl fmt::Display for Instruction {
             Self::Load { dst, addr } => write!(f, "LOAD {}, [{}]", dst, addr),
             Self::Store { src, addr } => write!(f, "STORE [{}], {}", addr, src),
             Self::Int { vector } => write!(f, "INT {:#x}", vector),
+            Self::Cmp { dst, src } => write!(f, "CMP {}, {}", dst, src),
+            Self::Jz { addr } => write!(f, "JZ {:#x}", addr),
+            Self::Jnz { addr } => write!(f, "JNZ {:#x}", addr),
             Self::Halt => write!(f, "HALT"),
         }
     }
@@ -494,6 +512,24 @@ impl VirtualCPU {
             0x10 => {
                 Instruction::Jmp { addr: src_value }
             }
+            0x11 => {
+                // CMP dst, src — compare, set flags
+                let dst = Register::from_index(dst_reg as usize)
+                    .ok_or(CPUError::InvalidRegister { index: dst_reg as usize })?;
+                let src = if src_type == 0 {
+                    Operand::Reg(Register::from_index(src_value as usize)
+                        .ok_or(CPUError::InvalidRegister { index: src_value as usize })?)
+                } else {
+                    Operand::Imm(src_value)
+                };
+                Instruction::Cmp { dst, src }
+            }
+            0x12 => {
+                Instruction::Jz { addr: src_value }
+            }
+            0x13 => {
+                Instruction::Jnz { addr: src_value }
+            }
             0x80 => {
                 // INT
                 Instruction::Int { vector: src_value as u8 }
@@ -603,6 +639,21 @@ impl VirtualCPU {
 
             Instruction::Jmp { addr } => {
                 self.pc = addr;
+            }
+
+            Instruction::Cmp { dst, src } => {
+                let dst_val = self.read_register(dst);
+                let src_val = self.read_operand(src);
+                let result = dst_val.wrapping_sub(src_val);
+                self.flags = CPUFlags::from_result(result, dst_val, src_val);
+            }
+
+            Instruction::Jz { addr } => {
+                if self.flags.zero { self.pc = addr; }
+            }
+
+            Instruction::Jnz { addr } => {
+                if !self.flags.zero { self.pc = addr; }
             }
 
             Instruction::Int { vector } => {
