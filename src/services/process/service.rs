@@ -484,7 +484,7 @@ impl ProcessService {
                 if !cpu.is_halted() {
                     for _ in 0..3 {
                         if cpu.is_halted() { break; }
-                        if cpu.step().is_err() { cpu.halt(); break; }
+                        if cpu.step().is_err() { if pid != 1 { cpu.halt(); } break; }
                         // Direct syscall handling (no bus round-trip needed)
                         if cpu.syscall_pending {
                             cpu.syscall_pending = false;
@@ -524,8 +524,7 @@ impl ProcessService {
             }
 
             // xv6-style: halt → Zombie (parent or init will reap)
-            if cpus.get(&pid).map(|c| c.is_halted()).unwrap_or(false) {
-                drop(cpus);
+            if pid != 1 && cpus.get(&pid).map(|c| c.is_halted()).unwrap_or(false) {
                 self.scheduler.lock().unwrap().remove(pid, 1);
                 if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
                     if let Ok(mut p) = pcb.lock() {
@@ -557,7 +556,8 @@ impl ProcessService {
 
     /// Reap a zombie process: free memory, remove from table
     fn reap_process(&self, pid: Pid) {
-        // xv6: pages freed by parent's wait(), NOT by reaper
+        // Init (PID 1) must never die — root of process tree
+        if pid == 1 { return; }
         // Children may still need to fork from this process's page table
         // Remove CPU
         { self.cpus.lock().unwrap().remove(&pid); }
