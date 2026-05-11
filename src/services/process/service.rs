@@ -550,12 +550,10 @@ impl ProcessService {
 
     /// Reap a zombie process: free memory, remove from table
     fn reap_process(&self, pid: Pid) {
-        // Unmap pages
-        let entries = self._mmu.get_page_entries(pid);
-        for (vaddr, _, _) in &entries {
-            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: *vaddr })).ok();
-        }
+        // xv6: pages freed by parent's wait(), NOT by reaper
+        // Children may still need to fork from this process's page table
         // Remove CPU
+        { self.cpus.lock().unwrap().remove(&pid); }
         { self.cpus.lock().unwrap().remove(&pid); }
         // Remove from process table
         if let Ok(mut table) = Self::lock_mutex(&self.process_table) {

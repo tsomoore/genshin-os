@@ -503,7 +503,7 @@ impl VirtualCPU {
                 Instruction::Halt
             }
             _ => {
-                return Err(CPUError::InvalidInstruction { pc: self.pc - 11, opcode });
+                return Err(CPUError::InvalidInstruction { pc: self.pc.saturating_sub(11), opcode });
             }
         };
 
