@@ -1056,6 +1056,14 @@ impl ProcessService {
         }
         drop(parent_children);
 
+        // Check if child was already reaped (not in table but was our child)
+        let already_reaped = !self.process_table.lock().unwrap().contains_key(&child_pid);
+        if already_reaped {
+            vprintln!("PS: PID {} wait: child {} already reaped", pid, child_pid);
+            let _ = envelope.respond_success(ResponseData::Integer(0));
+            return Ok(());
+        }
+
         // Check if child is already zombie
         let is_zombie = self.process_table.lock().unwrap()
             .get(&child_pid)
