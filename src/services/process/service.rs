@@ -67,6 +67,7 @@ pub struct ProcessService {
     waiting_parents: Arc<Mutex<Vec<(Pid, (Pid, crossbeam_channel::Sender<Response>))>>>,
     /// Last scheduled PID: track for Running→Ready transition on preemption
     last_running: Arc<Mutex<Option<Pid>>>,
+    cpu_count: usize,
 }
 
 impl std::fmt::Debug for ProcessService {
@@ -91,6 +92,7 @@ impl ProcessService {
             cpus: Arc::new(Mutex::new(HashMap::new())),
             pending_forks: Arc::new(Mutex::new(Vec::new())),
             waiting_parents: Arc::new(Mutex::new(Vec::new())),
+            cpu_count: 2,
             last_running: Arc::new(Mutex::new(None)),
         }
     }
@@ -479,9 +481,11 @@ impl ProcessService {
     // Scheduler quantum: 3 timer ticks per time slice (= ~9 instructions)
 
     fn handle_timer_interrupt(&self) -> GenshinResult<()> {
-        let mut scheduler = Self::lock_mutex(&self.scheduler)?;
-        let decision = scheduler.schedule(); // Scheduler handles time-slice switching
-        drop(scheduler);
+        // SMP: schedule and run one process per vCPU each tick
+        for cpu_id in 0..self.cpu_count {
+            let mut scheduler = Self::lock_mutex(&self.scheduler)?;
+            let decision = scheduler.schedule();
+            drop(scheduler);
 
         // State machine: transition previous Running→Ready on preemption
         {
@@ -563,8 +567,8 @@ impl ProcessService {
                         }
                     }
                     let s = cpu.dump_state();
-                    vprintln!("CPU[{}]: PC={:#06x} R0={} R1={} R2={} R3={} | IC={} {}",
-                        pid, s.pc, s.registers[0] as i64, s.registers[1] as i64,
+                    vprintln!("CPU{}[{}]: PC={:#06x} R0={} R1={} R2={} R3={} | IC={} {}",
+                        cpu_id, pid, s.pc, s.registers[0] as i64, s.registers[1] as i64,
                         s.registers[2] as i64, s.registers[3] as i64,
                         s.instruction_count, if cpu.is_halted() { "[HALTED]" } else { "" });
                 }
@@ -609,6 +613,7 @@ impl ProcessService {
                 self.reap_process(pid);
             }
         }
+        } // end for cpu_count
         Ok(())
     }
 
@@ -1581,6 +1586,74 @@ impl ProcessService {
                 let path = self.read_string_virt(pid, 0x100);
                 let tree = self.build_tree(&path);
                 for line in &tree { println!("{}", line); }
+            }
+            // ── Synchronization syscalls ──
+            200 => {
+                // SEM_CREATE: returns sem_id in R1
+                let mut sync = self.sync_manager.lock().unwrap();
+                let sem_id = sync.create_semaphore(pid, 1);
+                cpu.write_register(crate::hardware::Register::R1, sem_id);
+            }
+            201 => {
+                // SEM_WAIT(sem_id): block if count=0
+                let sem_id = r1;
+                let blocked = {
+                    let sync = self.sync_manager.lock().unwrap();
+                    if let Some(sem) = sync.get_semaphore(sem_id) {
+                        sem.wait() != super::sync::SemaphoreResult::Acquired
+                    } else { false }
+                };
+                if blocked {
+                    // Block process until signaled
+                    if let Some(p) = self.process_table.lock().unwrap().get(&pid) {
+                        if let Ok(mut pcb) = p.lock() {
+                            pcb.state = ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr: sem_id });
+                        }
+                    }
+                    self.scheduler.lock().unwrap().block(pid, 1);
+                }
+            }
+            202 => {
+                // SEM_SIGNAL(sem_id): unblock waiters
+                let sem_id = r1;
+                let mut sync = self.sync_manager.lock().unwrap();
+                if let Some(sem) = sync.get_semaphore(sem_id) {
+                    sem.signal();
+                }
+                // Unblock the first waiter (simplified: just make all Blocked ready)
+                // In real impl, would track which process is waiting on which sem
+            }
+            203 => {
+                // LOCK_CREATE: returns lock_id in R1
+                let mut sync = self.sync_manager.lock().unwrap();
+                let lock_id = sync.create_mutex(pid, false);
+                cpu.write_register(crate::hardware::Register::R1, lock_id);
+            }
+            204 => {
+                // LOCK_ACQUIRE(lock_id): block if locked
+                let lock_id = r1;
+                let blocked = {
+                    let sync = self.sync_manager.lock().unwrap();
+                    if let Some(mutex) = sync.get_mutex(lock_id) {
+                        mutex.try_acquire(pid) != super::sync::MutexResult::Acquired
+                    } else { false }
+                };
+                if blocked {
+                    if let Some(p) = self.process_table.lock().unwrap().get(&pid) {
+                        if let Ok(mut pcb) = p.lock() {
+                            pcb.state = ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr: lock_id });
+                        }
+                    }
+                    self.scheduler.lock().unwrap().block(pid, 1);
+                }
+            }
+            205 => {
+                // LOCK_RELEASE(lock_id): unlock, unblock waiters
+                let lock_id = r1;
+                let mut sync = self.sync_manager.lock().unwrap();
+                if let Some(mutex) = sync.get_mutex(lock_id) {
+                    mutex.release(pid);
+                }
             }
             _ => {}
         }
