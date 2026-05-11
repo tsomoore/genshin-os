@@ -488,9 +488,7 @@ impl ProcessService {
                                 if let KernelMsg::Interrupt(int) = &env.message {
                                     match int {
                                         crate::messaging::Interrupt::SyscallTrap => {
-                                            let st = cpu.dump_state();
-                                            self.handle_file_syscall(cpu, st.registers[0], st.registers[1], st.registers[2]);
-                                            if cpu.is_halted() { break; }
+                                            // Already handled via syscall_pending above; skip
                                         }
                                         crate::messaging::Interrupt::PageFault { addr, .. } => {
                                             let _ = self.bus.send_request(KernelMsg::Memory(
