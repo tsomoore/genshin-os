@@ -214,7 +214,9 @@ impl Shell {
                 self.fork_exec_wait("write", &[&p, &content])
             }
             "dual" => {
-                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "dual".into(), params: vec![] });
+                let prog = command.args.get(0).map(|s| s.as_str()).unwrap_or("busy");
+                let pname = if prog == "busy" { "dual".into() } else { format!("dual:{}", prog) };
+                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: pname, params: vec![] });
                 let _ = self.send_and_wait(msg)?;
                 Ok(())
             }
@@ -225,11 +227,7 @@ impl Shell {
                 println!("fork: PID {} now runs fork program via CPU", pid);
                 Ok(())
             }
-            "dual" => {
-                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "dual".into(), params: vec![] });
-                let _ = self.send_and_wait(msg)?;
-                Ok(())
-            }
+
             "fork" => {
                 let pid: u64 = command.args.get(0).and_then(|s| s.parse().ok()).unwrap_or(1);
                 // Load fork program into PID, let CPU execute it → INT 0x80 → handle_file_syscall(100) → fork_impl
