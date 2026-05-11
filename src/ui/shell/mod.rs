@@ -163,10 +163,18 @@ impl Shell {
                 }
             }
             "ls" => {
-                let path = command.args.first().map(|s| s.as_str()).unwrap_or(".");
-                let target = self.resolve_path(path);
-                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "ls".into(), params: target.as_bytes().to_vec() });
-                let _ = self.send_and_wait(msg)?;
+                // fork + exec + wait: the Unix way
+                let fork_msg = KernelMsg::Process(ProcessRequest::ForkProcess { parent_pid: 1 });
+                let child_pid = match self.send_and_wait(fork_msg) {
+                    Ok(r) => if let Some(ResponseData::Pid(p)) = r.data() { *p } else { return Err("fork failed".into()); },
+                    Err(e) => return Err(e),
+                };
+                let exec_msg = KernelMsg::Process(ProcessRequest::ExecProcess {
+                    pid: child_pid, executable: "ls".into(), args: vec![],
+                });
+                self.send_and_wait(exec_msg)?;
+                let wait_msg = KernelMsg::Process(ProcessRequest::WaitChild { pid: 1, child_pid: Some(child_pid) });
+                self.send_and_wait(wait_msg)?;
                 Ok(())
             }
             "tree" => {

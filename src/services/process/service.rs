@@ -63,6 +63,8 @@ pub struct ProcessService {
 
     /// Pending fork requests: list of caller PIDs to process in main loop
     pending_forks: Arc<Mutex<Vec<Pid>>>,
+    /// Parents waiting on children: (child_pid, (parent_pid, response_channel))
+    waiting_parents: Arc<Mutex<Vec<(Pid, (Pid, crossbeam_channel::Sender<Response>))>>>,
 }
 
 impl std::fmt::Debug for ProcessService {
@@ -86,6 +88,7 @@ impl ProcessService {
             _hw: hw, _mmu: mmu,
             cpus: Arc::new(Mutex::new(HashMap::new())),
             pending_forks: Arc::new(Mutex::new(Vec::new())),
+            waiting_parents: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -531,6 +534,17 @@ impl ProcessService {
                         if !p.state.is_terminated() {
                             p.state = ProcessState::Zombie { exit_code: 0 };
                             vprintln!("PS: PID {} → Zombie", pid);
+                            // Notify waiting parent
+                            let mut wp = self.waiting_parents.lock().unwrap();
+                            if let Some(pos) = wp.iter().position(|(cpid, _)| *cpid == pid) {
+                                let (_, (_, tx)) = wp.remove(pos);
+                                let exit_code = match p.state {
+                                    ProcessState::Zombie { exit_code } => exit_code,
+                                    _ => 0,
+                                };
+                                let _ = tx.send(Response::success(0, ResponseData::Integer(exit_code as u64)));
+                                vprintln!("PS: notified parent, child {} exit={}", pid, exit_code);
+                            }
                         }
                     }
                 }
@@ -973,30 +987,44 @@ impl ProcessService {
 
     /// Handle wait child with response
     fn handle_wait_child_with_response(&self, pid: Pid, child_pid: Option<Pid>, envelope: &Envelope) -> GenshinResult<()> {
+        let child_pid = child_pid.ok_or_else(|| GenshinError::Service(ServiceError::InvalidArguments {
+            param: "child_pid".into(), reason: "must specify child PID".into(),
+        }))?;
+
+        // Verify child is our child
         let parent_children = Self::lock_mutex(&self.parent_children)?;
-
-        // Check if child exists and is a child of parent
-        if let Some(child_pid) = child_pid {
-            if !parent_children.get(&pid).map(|children| children.contains(&child_pid)).unwrap_or(false) {
-                envelope.respond_error(MsgServiceError::PermissionDenied {
-                    operation: "wait".to_string(),
-                })?;
-                return Ok(());
-            }
+        if !parent_children.get(&pid).map(|c| c.contains(&child_pid)).unwrap_or(false) {
+            let _ = envelope.respond_error(MsgServiceError::PermissionDenied { operation: "wait".into() });
+            return Ok(());
         }
-
-        // Block parent until child exits
         drop(parent_children);
-        self.handle_block(pid, 1, BlockReason::WaitingForChild { pid: child_pid.unwrap_or(0) })?;
 
-        // For now, we'll immediately return the child exit status
-        // In a real implementation, we'd need to actually wait for the child
-        let child_status = ResponseData::Integer(0); // TODO: Get actual exit status
+        // Check if child is already zombie
+        let is_zombie = self.process_table.lock().unwrap()
+            .get(&child_pid)
+            .map(|p| p.lock().ok().map(|pcb| pcb.state.is_terminated()).unwrap_or(false))
+            .unwrap_or(false);
 
-        println!("ProcessService: Process {} waiting for child {:?}", pid, child_pid);
-
-        envelope.respond_success(child_status)?;
-
+        if is_zombie {
+            // Reap immediately: remove child, return exit code
+            self.scheduler.lock().unwrap().remove(child_pid, 1);
+            if let Some(pcb) = self.process_table.lock().unwrap().remove(&child_pid) {
+                let exit_code = pcb.lock().ok().and_then(|p| {
+                    match p.state {
+                        ProcessState::Zombie { exit_code } => Some(exit_code),
+                        _ => Some(0),
+                    }
+                }).unwrap_or(0);
+                vprintln!("PS: PID {} waited, child {} reaped (exit {})", pid, child_pid, exit_code);
+                let _ = envelope.respond_success(ResponseData::Integer(exit_code as u64));
+            }
+        } else {
+            // Child still alive: store waiting entry, respond later
+            if let Some(tx) = envelope.response_channel.clone() {
+                self.waiting_parents.lock().unwrap().push((child_pid, (pid, tx)));
+            }
+            vprintln!("PS: PID {} waiting for child {}", pid, child_pid);
+        }
         Ok(())
     }
 
