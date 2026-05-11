@@ -139,6 +139,109 @@ impl Shell {
     }
 
     /// Send a request via the message bus and wait for the response
+    /// Mini debugger: step through a program instruction by instruction
+    fn run_minigdb(&self, prog: &str) -> Result<(), String> {
+        use crate::hardware::{PhysicalMemory, MMU, VirtualCPU, PageFlags};
+        use crate::messaging::LockedBus;
+        use std::io::{BufRead, Write};
+
+        // Load and assemble the program
+        let path = format!("programs/{}", prog);
+        let asm_path = if prog.ends_with(".asm") { path.clone() } else { format!("{}.asm", path) };
+        let asm_code = std::fs::read_to_string(&asm_path)
+            .map_err(|e| format!("Cannot read {}: {}", asm_path, e))?;
+
+        // Assemble
+        let code = crate::services::process::assembler::assemble(&asm_code)
+            .map_err(|e| format!("Assemble error: {}", e))?;
+
+        // Setup hardware
+        let mem = PhysicalMemory::new(64 * 1024);
+        let mmu = Arc::new(MMU::new(mem.clone(), 4096));
+        let bus: Arc<dyn MessageBus> = Arc::new(LockedBus::new());
+        let mut cpu = VirtualCPU::new(mmu.clone(), bus, 0);
+
+        // Map and write program
+        mmu.map_page(0, 0, 0, PageFlags { present: true, writable: true, user_accessible: true }).ok();
+        for (i, &b) in code.iter().enumerate() {
+            mmu.write_u8(0, i as u64, b).ok();
+        }
+        cpu.set_pc(0);
+        cpu.set_sp(0xFFFF);
+
+        println!("minigdb: loaded {} ({} bytes, {} instrs)", prog, code.len(), code.len()/8);
+        println!("Commands: s(step) r(regs) c(continue) q(quit)");
+        print!("(gdb) "); std::io::stdout().flush().ok();
+
+        let stdin = std::io::stdin();
+        let mut lines = stdin.lock().lines();
+        let mut running = true;
+        let mut instr_count = 0;
+
+        while running {
+            let line = match lines.next() {
+                Some(Ok(l)) => l.trim().to_string(),
+                _ => break,
+            };
+
+            match line.as_str() {
+                "s" | "step" | "" => {
+                    if cpu.is_halted() {
+                        println!("[HALTED]");
+                        break;
+                    }
+                    let pc_before = cpu.pc();
+                    match cpu.step() {
+                        Ok(()) => {
+                            instr_count += 1;
+                            let st = cpu.dump_state();
+                            let inst_bytes = &code[pc_before as usize..std::cmp::min(pc_before as usize + 8, code.len())];
+                            println!("  #{:<3} 0x{:04x}: {:02x?}  | R0={:<5} R1={:<5} R2={:<5} R3={:<5} | PC=0x{:04x} SP=0x{:04x} Z={} S={}",
+                                instr_count, pc_before, inst_bytes,
+                                st.registers[0] as i64, st.registers[1] as i64,
+                                st.registers[2] as i64, st.registers[3] as i64,
+                                st.pc, st.sp,
+                                st.flags.zero as u8, st.flags.sign as u8);
+                            if cpu.is_halted() {
+                                println!("[HALTED after {} instructions]", instr_count);
+                            }
+                        }
+                        Err(e) => println!("Error: {:?}", e),
+                    }
+                }
+                "r" | "regs" => {
+                    let st = cpu.dump_state();
+                    println!("  R0=0x{:016x} ({})", st.registers[0], st.registers[0] as i64);
+                    println!("  R1=0x{:016x} ({})", st.registers[1], st.registers[1] as i64);
+                    println!("  R2=0x{:016x} ({})", st.registers[2], st.registers[2] as i64);
+                    println!("  R3=0x{:016x} ({})", st.registers[3], st.registers[3] as i64);
+                    println!("  PC=0x{:04x}  SP=0x{:04x}", st.pc, st.sp);
+                    println!("  Z={} S={} O={} C={}",
+                        st.flags.zero as u8, st.flags.sign as u8,
+                        st.flags.overflow as u8, st.flags.carry as u8);
+                }
+                "c" | "continue" => {
+                    while !cpu.is_halted() {
+                        if cpu.step().is_err() { cpu.halt(); break; }
+                        instr_count += 1;
+                    }
+                    println!("Ran to HALT ({} total instructions)", instr_count);
+                }
+                "q" | "quit" | "exit" => {
+                    running = false;
+                }
+                _ if !line.is_empty() => {
+                    println!("Unknown command: {} (s=step, r=regs, c=continue, q=quit)", line);
+                }
+                _ => {} // Rust 2024: empty string already covered above
+            }
+            if running && !cpu.is_halted() {
+                print!("(gdb) "); std::io::stdout().flush().ok();
+            }
+        }
+        Ok(())
+    }
+
     fn send_and_wait(&self, msg: KernelMsg) -> Result<Response, String> {
         let rx = self.context.send_request(msg)
             .map_err(|e| format!("Bus error: {}", e))?;
@@ -348,6 +451,10 @@ impl Shell {
                 let _ = self.send_and_wait(msg)?;
                 println!("run: started '{}'", prog);
                 Ok(())
+            }
+            "minigdb" => {
+                let prog = command.args.get(0).ok_or("minigdb: missing program")?;
+                self.run_minigdb(prog)
             }
             "ps"|"pstree" => {
                 let msg = KernelMsg::Process(crate::messaging::ProcessRequest::ListProcesses);
