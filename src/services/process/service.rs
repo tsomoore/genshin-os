@@ -1375,31 +1375,7 @@ impl ProcessService {
                 vprintln!("PS: Spawn '{}' (PID {})", prog_name, pid);
                 pids.push((pid, base));
             }
-            // Drive scheduler until all processes complete
-            for _ in 0..200 {
-                let all_done = pids.iter().all(|(p, _)| {
-                    let halted = self.cpus.lock().unwrap().get(p).map(|cpu| cpu.is_halted()).unwrap_or(true);
-                    if !halted { return false; }
-                    // Only count as done if actually terminated (not just blocked)
-                    self.process_table.lock().unwrap().get(p).map(|pcb| {
-                        pcb.lock().ok().map(|p| p.state.is_terminated()).unwrap_or(true)
-                    }).unwrap_or(true)
-                });
-                if all_done { break; }
-                let _ = self.handle_timer_interrupt();
-            }
-            // Cleanup both processes
-            for (pid, base) in pids {
-                let mut cpus = self.cpus.lock().unwrap();
-                if let Some(cpu) = cpus.remove(&pid) {
-                    vprintln!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
-                }
-                drop(cpus);
-                { let mut s = self.scheduler.lock().unwrap(); s.remove(pid, 1); }
-                { let mut t = self.process_table.lock().unwrap(); t.remove(&pid); }
-                self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
-                self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
-            }
+            // Respond immediately — processes run via timer, reaper cleans up
             let _ = envelope.respond_success(ResponseData::Void);
             return Ok(());
         }
