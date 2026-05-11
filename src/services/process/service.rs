@@ -60,6 +60,9 @@ pub struct ProcessService {
     _hw: crate::hardware::PhysicalMemory,
     _mmu: Arc<crate::hardware::MMU>,
     cpus: Arc<Mutex<HashMap<Pid, crate::hardware::VirtualCPU>>>,
+
+    /// Pending fork requests: list of caller PIDs to process in main loop
+    pending_forks: Arc<Mutex<Vec<Pid>>>,
 }
 
 impl std::fmt::Debug for ProcessService {
@@ -82,7 +85,7 @@ impl ProcessService {
             parent_children: Arc::new(Mutex::new(HashMap::new())),
             _hw: hw, _mmu: mmu,
             cpus: Arc::new(Mutex::new(HashMap::new())),
-
+            pending_forks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -103,10 +106,12 @@ impl ProcessService {
                     if let Err(e) = self.handle_envelope(envelope) {
                         eprintln!("ProcessService error: {}", e);
                     }
+                    self.process_pending_forks();
                     let _ = self.handle_timer_interrupt();
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
+                    self.process_pending_forks();
                     let _ = self.handle_timer_interrupt();
                 }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
@@ -842,6 +847,45 @@ impl ProcessService {
         Ok(child_pid)
     }
 
+    /// Process pending fork requests (called from main loop, not timer)
+    fn process_pending_forks(&self) {
+        let pids: Vec<Pid> = {
+            let mut pf = self.pending_forks.lock().unwrap();
+            let pids = pf.clone();
+            pf.clear();
+            pids
+        };
+        for pid in pids {
+            match self.fork_impl(pid) {
+                Ok(child_pid) => {
+                    // Write child_pid to parent's CPU R0
+                    if let Some(cpu) = self.cpus.lock().unwrap().get_mut(&pid) {
+                        cpu.write_register(crate::hardware::Register::R0, child_pid);
+                    }
+                    // Unblock parent
+                    if let Some(p) = self.process_table.lock().unwrap().get(&pid) {
+                        if let Ok(mut pcb) = p.lock() {
+                            pcb.state = ProcessState::Ready;
+                        }
+                    }
+                    self.scheduler.lock().unwrap().ready(pid, 1, 128);
+                    vprintln!("PS: async fork {} -> {} (parent unblocked)", pid, child_pid);
+                }
+                Err(_) => {
+                    // Fork failed: unblock with R0=0
+                    if let Some(cpu) = self.cpus.lock().unwrap().get_mut(&pid) {
+                        cpu.write_register(crate::hardware::Register::R0, 0);
+                    }
+                    if let Some(p) = self.process_table.lock().unwrap().get(&pid) {
+                        if let Ok(mut pcb) = p.lock() {
+                            pcb.state = ProcessState::Ready;
+                        }
+                    }
+                    self.scheduler.lock().unwrap().ready(pid, 1, 128);
+                }
+            }
+        }
+    }
     fn handle_exec(&self, pid: Pid, executable: String, args: Vec<String>) -> GenshinResult<()> {
         self.exec_impl(pid, executable, args)
     }
@@ -1425,11 +1469,15 @@ impl ProcessService {
             }
             // ========== Process syscalls (triggered by CPU INT) ==========
             100 => {
-                // FORK: clone current process, child gets R0=0, parent gets R0=child_pid
-                match self.fork_impl(pid) {
-                    Ok(child_pid) => { cpu.write_register(crate::hardware::Register::R0, child_pid); }
-                    Err(_) => { cpu.write_register(crate::hardware::Register::R0, 0); }
+                // Async FORK: block caller, defer work to main loop
+                self.scheduler.lock().unwrap().block(pid, 1);
+                if let Some(p) = self.process_table.lock().unwrap().get(&pid) {
+                    if let Ok(mut pcb) = p.lock() {
+                        pcb.state = ProcessState::Blocked(BlockReason::WaitingForIo { device_id: 0 });
+                    }
                 }
+                self.pending_forks.lock().unwrap().push(pid);
+                // Don't call fork_impl here — main loop processes it
             }
             101 => {
                 // EXEC: replace current process with program at 0x100
