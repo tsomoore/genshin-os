@@ -181,15 +181,30 @@ impl Shell {
                 }
             }
             "ls" => self.fork_exec_wait("ls", &[]),
-            "mkdir" => self.fork_exec_wait("mkdir", &[command.args.get(0).ok_or("mkdir: missing operand")?]),
-            "touch" => self.fork_exec_wait("touch", &[command.args.get(0).ok_or("touch: missing operand")?]),
-            "cat" => self.fork_exec_wait("cat", &[command.args.get(0).ok_or("cat: missing operand")?]),
-            "rm" => self.fork_exec_wait("rm", &[command.args.get(0).ok_or("rm: missing operand")?]),
-            "stat" => self.fork_exec_wait("stat", &[command.args.get(0).ok_or("stat: missing operand")?]),
+            "mkdir" => {
+                let p = self.resolve_path(command.args.get(0).ok_or("mkdir: missing operand")?);
+                self.fork_exec_wait("mkdir", &[&p])
+            }
+            "touch" => {
+                let p = self.resolve_path(command.args.get(0).ok_or("touch: missing operand")?);
+                self.fork_exec_wait("touch", &[&p])
+            }
+            "cat" => {
+                let p = self.resolve_path(command.args.get(0).ok_or("cat: missing operand")?);
+                self.fork_exec_wait("cat", &[&p])
+            }
+            "rm" => {
+                let p = self.resolve_path(command.args.get(0).ok_or("rm: missing operand")?);
+                self.fork_exec_wait("rm", &[&p])
+            }
+            "stat" => {
+                let p = self.resolve_path(command.args.get(0).ok_or("stat: missing operand")?);
+                self.fork_exec_wait("stat", &[&p])
+            }
             "write" => {
-                let path = command.args.get(0).ok_or("write: missing operand")?;
+                let p = self.resolve_path(command.args.get(0).ok_or("write: missing operand")?);
                 let content = if command.args.len() > 1 { command.args[1..].join(" ") } else { String::new() };
-                self.fork_exec_wait("write", &[path, &content])
+                self.fork_exec_wait("write", &[&p, &content])
             }
             "dual" => {
                 let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "dual".into(), params: vec![] });
