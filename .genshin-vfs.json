@@ -1,57 +1,8 @@
 [
   [
-    5,
+    6,
     "Directory",
-    "var",
-    0,
-    0,
-    {}
-  ],
-  [
-    8,
-    "File",
-    "hello.txt",
-    0,
-    0,
-    {}
-  ],
-  [
-    0,
-    "Directory",
-    "/",
-    null,
-    0,
-    {
-      "var": 5,
-      "home": 2,
-      "docs": 7,
-      "tmp": 3,
-      "examples": 6,
-      "etc": 4,
-      "hello.txt": 8,
-      "bin": 1
-    }
-  ],
-  [
-    1,
-    "Directory",
-    "bin",
-    0,
-    0,
-    {}
-  ],
-  [
-    4,
-    "Directory",
-    "etc",
-    0,
-    0,
-    {}
-  ],
-  [
-    2,
-    "Directory",
-    "home",
+    "examples",
     0,
     0,
     {}
@@ -65,9 +16,9 @@
     {}
   ],
   [
-    6,
+    1,
     "Directory",
-    "examples",
+    "bin",
     0,
     0,
     {}
@@ -76,6 +27,46 @@
     7,
     "Directory",
     "docs",
+    0,
+    0,
+    {}
+  ],
+  [
+    2,
+    "Directory",
+    "home",
+    0,
+    0,
+    {}
+  ],
+  [
+    4,
+    "Directory",
+    "etc",
+    0,
+    0,
+    {}
+  ],
+  [
+    0,
+    "Directory",
+    "/",
+    null,
+    0,
+    {
+      "docs": 7,
+      "home": 2,
+      "examples": 6,
+      "etc": 4,
+      "tmp": 3,
+      "bin": 1,
+      "var": 5
+    }
+  ],
+  [
+    5,
+    "Directory",
+    "var",
     0,
     0,
     {}

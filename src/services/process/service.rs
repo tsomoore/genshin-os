@@ -921,7 +921,8 @@ impl ProcessService {
         }
 
         let code = if let Some(c) = self.load_program(&executable) { c } else {
-            let b = self.gen_builtin_program(&executable, 0);
+            let data_len = args.get(1).map(|s| s.len()).unwrap_or(0);
+            let b = self.gen_builtin_program(&executable, data_len);
             if b[0] != 0xFF { b } else {
                 return Err(GenshinError::Service(ServiceError::NotFound{resource_type:"Program".into(),id:executable}));
             }
