@@ -248,7 +248,7 @@ impl ProcessService {
                 self.handle_fork(parent_pid)?;
             }
 
-            ProcessRequest::ExecProcess { pid, executable, args } => {
+            ProcessRequest::ExecProcess { pid, executable, args, .. } => {
                 self.handle_exec(pid, executable, args)?;
             }
 
@@ -281,7 +281,7 @@ impl ProcessService {
                 self.handle_fork_with_response(parent_pid, envelope)?;
             }
 
-            ProcessRequest::ExecProcess { pid, executable, args } => {
+            ProcessRequest::ExecProcess { pid, executable, args, .. } => {
                 self.handle_exec_with_response(pid, executable, args, envelope)?;
             }
 
@@ -939,6 +939,13 @@ impl ProcessService {
             })) { let _=rx.recv_timeout(std::time::Duration::from_secs(2)); }
         }
         self.write_slice_virt(pid, 0, &code);
+        // Write args to process memory (0x100 = arg0, 0x200 = arg1)
+        if let Some(path) = args.first() {
+            self.write_slice_virt(pid, 0x100, path.as_bytes());
+        }
+        if args.len() > 1 {
+            self.write_slice_virt(pid, 0x200, args[1].as_bytes());
+        }
         // Reset CPU
         if let Some(cpu) = self.cpus.lock().unwrap().get_mut(&pid) {
             cpu.set_pc(0); cpu.set_sp(0xFFFF);

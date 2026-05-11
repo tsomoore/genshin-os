@@ -252,6 +252,7 @@ pub enum ProcessRequest {
         pid: Pid,
         executable: String,
         args: Vec<String>,
+        path: Option<String>,
     },
 
     /// Wait for child process to exit
@@ -642,6 +643,7 @@ pub enum IPCMessage {
     Control {
         cmd: String,
         args: Vec<String>,
+        path: Option<String>,
     },
 }
 

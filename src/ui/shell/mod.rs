@@ -121,6 +121,24 @@ impl Shell {
     }
 
     /// Send a request via the message bus and wait for the response
+    /// fork + exec + wait helper: the Unix way
+    fn fork_exec_wait(&self, prog: &str, args: &[&str]) -> Result<(), String> {
+        let fork_msg = KernelMsg::Process(ProcessRequest::ForkProcess { parent_pid: 1 });
+        let child_pid = match self.send_and_wait(fork_msg) {
+            Ok(r) => if let Some(ResponseData::Pid(p)) = r.data() { *p } else { return Err("fork failed".into()); },
+            Err(e) => return Err(e),
+        };
+        let a: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let exec_msg = KernelMsg::Process(ProcessRequest::ExecProcess {
+            pid: child_pid, executable: prog.into(), args: a, path: None,
+        });
+        self.send_and_wait(exec_msg)?;
+        let wait_msg = KernelMsg::Process(ProcessRequest::WaitChild { pid: 1, child_pid: Some(child_pid) });
+        self.send_and_wait(wait_msg)?;
+        Ok(())
+    }
+
+    /// Send a request via the message bus and wait for the response
     fn send_and_wait(&self, msg: KernelMsg) -> Result<Response, String> {
         let rx = self.context.send_request(msg)
             .map_err(|e| format!("Bus error: {}", e))?;
@@ -162,81 +180,27 @@ impl Shell {
                     Err(_) => Err(format!("cd: {}: No such directory", path)),
                 }
             }
-            "ls" => {
-                // fork + exec + wait: the Unix way
-                let fork_msg = KernelMsg::Process(ProcessRequest::ForkProcess { parent_pid: 1 });
-                let child_pid = match self.send_and_wait(fork_msg) {
-                    Ok(r) => if let Some(ResponseData::Pid(p)) = r.data() { *p } else { return Err("fork failed".into()); },
-                    Err(e) => return Err(e),
-                };
-                let exec_msg = KernelMsg::Process(ProcessRequest::ExecProcess {
-                    pid: child_pid, executable: "ls".into(), args: vec![],
-                });
-                self.send_and_wait(exec_msg)?;
-                let wait_msg = KernelMsg::Process(ProcessRequest::WaitChild { pid: 1, child_pid: Some(child_pid) });
-                self.send_and_wait(wait_msg)?;
-                Ok(())
-            }
-            "tree" => {
-                let path = command.args.first().map(|s| s.as_str()).unwrap_or("/");
-                let target = self.resolve_path(path);
-                let root = PathBuf::from(&target);
-                println!("{}", root.display());
-                self.print_tree_recursive(&root, "");
-                Ok(())
-            }
-            "cd" => {
-                let path = command.args.get(0).map(|s| s.as_str()).unwrap_or("/");
-                let target = self.resolve_path(path);
-                let msg = KernelMsg::File(crate::messaging::FileRequest::Stat { path: target.clone() });
-                match self.send_and_wait(msg) {
-                    Ok(_) => { self.cwd = target; Ok(()) }
-                    Err(_) => Err(format!("cd: {}: No such directory", path)),
-                }
-            }
-            "mkdir" => {
-                let path = command.args.get(0).ok_or_else(|| "mkdir: missing operand".to_string())?;
-                let target = self.resolve_path(path);
-                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "mkdir".into(), params: target.as_bytes().to_vec() });
-                let _ = self.send_and_wait(msg)?;
-                Ok(())
-            }
-            "touch" => {
-                let path = command.args.get(0).ok_or_else(|| "touch: missing operand".to_string())?;
-                let target = self.resolve_path(path);
-                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "touch".into(), params: target.as_bytes().to_vec() });
-                let _ = self.send_and_wait(msg)?;
-                Ok(())
-            }
-            "cat" => {
-                let path = command.args.get(0).ok_or_else(|| "cat: missing operand".to_string())?;
-                let target = self.resolve_path(path);
-                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "cat".into(), params: target.as_bytes().to_vec() });
-                let _ = self.send_and_wait(msg)?;
-                Ok(())
-            }
+            "ls" => self.fork_exec_wait("ls", &[]),
+            "mkdir" => self.fork_exec_wait("mkdir", &[command.args.get(0).ok_or("mkdir: missing operand")?]),
+            "touch" => self.fork_exec_wait("touch", &[command.args.get(0).ok_or("touch: missing operand")?]),
+            "cat" => self.fork_exec_wait("cat", &[command.args.get(0).ok_or("cat: missing operand")?]),
+            "rm" => self.fork_exec_wait("rm", &[command.args.get(0).ok_or("rm: missing operand")?]),
+            "stat" => self.fork_exec_wait("stat", &[command.args.get(0).ok_or("stat: missing operand")?]),
             "write" => {
-                let path = command.args.get(0).ok_or_else(|| "write: missing operand".to_string())?;
+                let path = command.args.get(0).ok_or("write: missing operand")?;
                 let content = if command.args.len() > 1 { command.args[1..].join(" ") } else { String::new() };
-                let target = self.resolve_path(path);
-                let params = { let mut p = target.as_bytes().to_vec(); p.push(0); p.extend_from_slice(content.as_bytes()); p };
-                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "write".into(), params });
+                self.fork_exec_wait("write", &[path, &content])
+            }
+            "dual" => {
+                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "dual".into(), params: vec![] });
                 let _ = self.send_and_wait(msg)?;
                 Ok(())
             }
-            "rm" => {
-                let path = command.args.get(0).ok_or_else(|| "rm: missing operand".to_string())?;
-                let target = self.resolve_path(path);
-                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "rm".into(), params: target.as_bytes().to_vec() });
+            "fork" => {
+                let pid: u64 = command.args.get(0).and_then(|s| s.parse().ok()).unwrap_or(1);
+                let msg = KernelMsg::Process(ProcessRequest::ExecProcess { pid, executable: "fork".into(), args: vec![], path: None });
                 let _ = self.send_and_wait(msg)?;
-                Ok(())
-            }
-            "stat" => {
-                let path = command.args.get(0).ok_or_else(|| "stat: missing operand".to_string())?;
-                let target = self.resolve_path(path);
-                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: "stat".into(), params: target.as_bytes().to_vec() });
-                let _ = self.send_and_wait(msg)?;
-                println!("stat: '{}'", path);
+                println!("fork: PID {} now runs fork program via CPU", pid);
                 Ok(())
             }
             "dual" => {
@@ -247,7 +211,7 @@ impl Shell {
             "fork" => {
                 let pid: u64 = command.args.get(0).and_then(|s| s.parse().ok()).unwrap_or(1);
                 // Load fork program into PID, let CPU execute it → INT 0x80 → handle_file_syscall(100) → fork_impl
-                let msg = KernelMsg::Process(ProcessRequest::ExecProcess { pid, executable: "fork".into(), args: vec![] });
+                let msg = KernelMsg::Process(ProcessRequest::ExecProcess { pid, executable: "fork".into(), args: vec![], path: None });
                 let _ = self.send_and_wait(msg)?;
                 println!("fork: PID {} now runs fork program via CPU", pid);
                 Ok(())
@@ -277,7 +241,7 @@ impl Shell {
                     ),
                 };
                 let a: Vec<String> = if command.args.len() > 2 { command.args[2..].to_vec() } else { vec![] };
-                let msg = KernelMsg::Process(ProcessRequest::ExecProcess { pid, executable: prog.clone(), args: a });
+                let msg = KernelMsg::Process(ProcessRequest::ExecProcess { pid, executable: prog.clone(), args: a, path: None });
                 let _ = self.send_and_wait(msg)?;
                 println!("exec: PID {} now '{}'", pid, prog);
                 Ok(())
