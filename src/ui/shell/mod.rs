@@ -357,9 +357,16 @@ impl Shell {
                 println!("run: started '{}'", prog);
                 Ok(())
             }
-            "ps" => {
+            "ps"|"pstree" => {
                 let msg = KernelMsg::Process(crate::messaging::ProcessRequest::ListProcesses);
-                self.context.send(msg);
+                match self.send_and_wait(msg) {
+                    Ok(resp) => {
+                        if let Some(ResponseData::String(s)) = resp.data() {
+                            print!("{}", s);
+                        }
+                    }
+                    Err(e) => eprintln!("pstree: {}", e),
+                }
                 Ok(())
             }
             _ => {

@@ -285,6 +285,10 @@ impl ProcessService {
                 self.handle_get_process_info_with_response(pid, envelope)?;
             }
 
+            ProcessRequest::ListProcesses => {
+                self.handle_list_processes_with_response(envelope)?;
+            }
+
             ProcessRequest::Spawn { program, params } => {
                 self.handle_spawn(program, params, envelope)?;
             }
@@ -1026,12 +1030,54 @@ impl ProcessService {
     }
 
     fn handle_list_processes(&self) -> GenshinResult<()> {
-        let table = Self::lock_mutex(&self.process_table)?;
-        println!("ProcessService: Process list:");
-        for pid in table.keys() {
-            println!("  PID {}", pid);
-        }
+        // Replaced by handle_list_processes_with_response
+        println!("use pstree");
         Ok(())
+    }
+
+    fn handle_list_processes_with_response(&self, envelope: &Envelope) -> GenshinResult<()> {
+        let table = Self::lock_mutex(&self.process_table)?;
+        let parent_children = Self::lock_mutex(&self.parent_children)?;
+
+        // Collect process info
+        let mut procs: Vec<(Pid, String, String, Option<Pid>)> = Vec::new();
+        for (&pid, pcb) in table.iter() {
+            if let Ok(p) = pcb.lock() {
+                procs.push((pid, p.name.clone(), format!("{:?}", p.state), p.parent_pid));
+            }
+        }
+        procs.sort_by_key(|(pid, _, _, _)| *pid);
+
+        // Build tree: find roots (parent_pid not in table, or None)
+        let pids: std::collections::HashSet<Pid> = procs.iter().map(|(p,_,_,_)| *p).collect();
+
+        let mut output = String::new();
+        for (pid, name, state, ppid) in &procs {
+            let is_root = ppid.map_or(true, |pp| !pids.contains(&pp));
+            if is_root {
+                self.format_tree(&procs, *pid, "", true, &mut output);
+            }
+        }
+
+        let _ = envelope.respond_success(ResponseData::String(if output.is_empty() { "(empty)".into() } else { output }));
+        Ok(())
+    }
+
+    fn format_tree(&self, procs: &[(Pid, String, String, Option<Pid>)], pid: Pid, prefix: &str, is_last: bool, output: &mut String) {
+        let info = procs.iter().find(|(p,_,_,_)| *p == pid);
+        if let Some((_, name, state, _)) = info {
+            let connector = if is_last { "└── " } else { "├── " };
+            output.push_str(&format!("{}{}PID {} [{}] {}\n", prefix, connector, pid, state, name));
+        } else { return; }
+
+        let children: Vec<Pid> = procs.iter()
+            .filter(|(_, _, _, pp)| *pp == Some(pid))
+            .map(|(p,_,_,_)| *p)
+            .collect();
+        let child_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+        for (i, &child_pid) in children.iter().enumerate() {
+            self.format_tree(procs, child_pid, &child_prefix, i == children.len() - 1, output);
+        }
     }
 
     // ========== Helper Methods ==========
@@ -1334,7 +1380,7 @@ impl ProcessService {
         let path = self.read_string_virt(pid, 0x100);
         use crate::messaging::{FileRequest, OpenFlags, ResponseData};
         match r0 {
-            0 => cpu.halt(),
+            0 => { if pid != 1 { cpu.halt(); } /* init never halts */ },
             1 => println!("[PRINT] {}", r1 as i64),
             2 => {
                 let data = self.read_bytes_virt(pid, r1, r2 as usize);
