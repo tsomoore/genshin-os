@@ -204,7 +204,7 @@ impl VirtualFileSystem {
             "add.asm", "busy.asm", "cat.asm", "count.asm", "divide.asm",
             "exec.asm", "fork.asm", "hello.asm", "init.asm", "loop.asm",
             "ls.asm", "mkdir.asm", "multiply.asm", "pf.asm", "rm.asm",
-            "stat.asm", "sub.asm", "touch.asm", "tree.asm", "write.asm",
+            "stat.asm", "sub.asm", "swaptest.asm", "touch.asm", "tree.asm", "write.asm",
         ];
         let prog_inode = {
             let root = vfs.nodes.get(&0).unwrap().lock().unwrap();

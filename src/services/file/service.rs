@@ -116,7 +116,20 @@ impl FileService {
             let mut vfs = match self.vfs.lock() { Ok(v) => v, Err(_) => return, };
             let node = match vfs.lookup_path(&vfs_path) {
                 Ok(n) => n,
-                Err(_) => continue,
+                Err(_) => {
+                    // File doesn't exist in VFS yet — create it
+                    let parent_path = vfs_dir.to_string();
+                    if let Ok(parent_node) = vfs.lookup_path(&parent_path) {
+                        let parent_inode = parent_node.lock().unwrap().inode;
+                        drop(parent_node);
+                        if vfs.create_file(parent_inode, fname.clone(), 0).is_ok() {
+                            match vfs.lookup_path(&vfs_path) {
+                                Ok(n) => n,
+                                Err(_) => continue,
+                            }
+                        } else { continue; }
+                    } else { continue; }
+                }
             };
             let inode = { node.lock().unwrap().inode };
             drop(vfs);
