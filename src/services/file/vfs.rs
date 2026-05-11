@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use crate::messaging::Pid;
 use crate::{GenshinResult, GenshinError, ServiceError};
-
+use crate::vprintln;
 /// Node type in the file system
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NodeType {
     File,
     Directory,
@@ -20,7 +20,7 @@ pub enum NodeType {
 }
 
 /// VFS node - represents a file or directory
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct VFSNode {
     /// Node ID (inode number)
     pub inode: u64,
@@ -366,6 +366,52 @@ impl VirtualFileSystem {
     /// Get node count
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Save VFS to JSON file
+    pub fn save_to_file(&self, path: &str) -> GenshinResult<()> {
+        let mut nodes_vec = Vec::new();
+        for (_, node_arc) in &self.nodes {
+            let node = node_arc.lock().map_err(|_| GenshinError::Service(ServiceError::Other {
+                code: 99, msg: "vfs lock".into(),
+            }))?;
+            nodes_vec.push((node.inode, node.node_type, node.name.clone(), node.parent, node.size, node.children.clone()));
+        }
+        let json = serde_json::to_string_pretty(&nodes_vec)
+            .map_err(|e| GenshinError::Service(ServiceError::Other { code: 98, msg: format!("json: {}", e) }))?;
+        std::fs::write(path, json)
+            .map_err(|e| GenshinError::Service(ServiceError::Other { code: 97, msg: format!("write: {}", e) }))?;
+        vprintln!("VFS: saved {} nodes to {}", nodes_vec.len(), path);
+        Ok(())
+    }
+
+    /// Load VFS from JSON file, returns new VFS
+    pub fn load_from_file(path: &str) -> Option<Self> {
+        let json = std::fs::read_to_string(path).ok()?;
+        let nodes_vec: Vec<(u64, NodeType, String, Option<u64>, u64, HashMap<String, u64>)> = serde_json::from_str(&json).ok()?;
+        let mut vfs = Self::new();
+        // First pass: create all nodes
+        for (inode, ntype, name, parent, size, _children) in &nodes_vec {
+            if *inode == 0 { continue; } // root already exists
+            let node = Arc::new(Mutex::new(VFSNode {
+                inode: *inode, node_type: *ntype, name: name.clone(),
+                parent: *parent, permissions: 0o644, owner: 0,
+                size: *size, created: 0, modified: 0,
+                blocks: Vec::new(), children: HashMap::new(),
+                ref_count: 1, deleted: false,
+            }));
+            vfs.nodes.insert(*inode, node);
+            if *inode >= vfs.next_inode { vfs.next_inode = *inode + 1; }
+        }
+        // Second pass: restore children
+        for (inode, _, _, _, _, children) in &nodes_vec {
+            if let Some(node_arc) = vfs.nodes.get(inode) {
+                let mut node = node_arc.lock().ok()?;
+                node.children = children.clone();
+            }
+        }
+        println!("VFS: loaded {} nodes from {}", nodes_vec.len(), path);
+        Some(vfs)
     }
 }
 

@@ -56,7 +56,7 @@ impl FileService {
         disk_size: usize,
         receiver: Receiver<Envelope>,
     ) -> Self {
-        let vfs = Arc::new(Mutex::new(VirtualFileSystem::new()));
+        let vfs = Arc::new(Mutex::new(VirtualFileSystem::load_from_file(".genshin-vfs.json").unwrap_or_else(VirtualFileSystem::new)));
         let fd_manager = Arc::new(Mutex::new(FileDescriptorManager::new(max_fds_per_process)));
         let open_files = Arc::new(Mutex::new(HashMap::new()));
         let sector_count = (disk_size / 512) as u32;
@@ -81,6 +81,10 @@ impl FileService {
                 Ok(envelope) => {
                     if let Err(e) = self.handle_envelope(envelope) {
                         eprintln!("FileService error: {}", e);
+                    }
+                    // Auto-save VFS
+                    if let Ok(vfs) = self.vfs.lock() {
+                        let _ = vfs.save_to_file(".genshin-vfs.json");
                     }
                 }
                 Err(_) => {
