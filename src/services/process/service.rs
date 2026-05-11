@@ -65,6 +65,8 @@ pub struct ProcessService {
     pending_forks: Arc<Mutex<Vec<Pid>>>,
     /// Parents waiting on children: (child_pid, (parent_pid, response_channel))
     waiting_parents: Arc<Mutex<Vec<(Pid, (Pid, crossbeam_channel::Sender<Response>))>>>,
+    /// Last scheduled PID: track for Running→Ready transition on preemption
+    last_running: Arc<Mutex<Option<Pid>>>,
 }
 
 impl std::fmt::Debug for ProcessService {
@@ -89,6 +91,7 @@ impl ProcessService {
             cpus: Arc::new(Mutex::new(HashMap::new())),
             pending_forks: Arc::new(Mutex::new(Vec::new())),
             waiting_parents: Arc::new(Mutex::new(Vec::new())),
+            last_running: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -480,8 +483,47 @@ impl ProcessService {
         let decision = scheduler.schedule(); // Scheduler handles time-slice switching
         drop(scheduler);
 
+        // State machine: transition previous Running→Ready on preemption
+        {
+            let mut last = self.last_running.lock().unwrap();
+            if let SchedulingDecision::Run { pid, .. } = &decision {
+                if last.map_or(true, |l| l != *pid) {
+                    if let Some(prev) = *last {
+                        if let Some(pcb) = self.process_table.lock().unwrap().get(&prev) {
+                            if let Ok(mut p) = pcb.lock() {
+                                if p.state == ProcessState::Running {
+                                    p.state = ProcessState::Ready;
+                                }
+                            }
+                        }
+                    }
+                    *last = Some(*pid);
+                }
+            } else {
+                // Idle: clear last running
+                if let Some(prev) = *last {
+                    if let Some(pcb) = self.process_table.lock().unwrap().get(&prev) {
+                        if let Ok(mut p) = pcb.lock() {
+                            if p.state == ProcessState::Running {
+                                p.state = ProcessState::Ready;
+                            }
+                        }
+                    }
+                }
+                *last = None;
+            }
+        }
 
         if let SchedulingDecision::Run { pid, .. } = decision {
+            // State machine: mark as Running
+            if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
+                if let Ok(mut p) = pcb.lock() {
+                    if p.state == ProcessState::Ready || p.state == ProcessState::Creating {
+                        p.state = ProcessState::Running;
+                    }
+                }
+            }
+
             let mut cpus = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?;
             if let Some(cpu) = cpus.get_mut(&pid) {
                 if !cpu.is_halted() {
