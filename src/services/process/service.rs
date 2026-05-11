@@ -794,7 +794,7 @@ impl ProcessService {
         for (vaddr, _paddr, flags) in self._mmu.get_page_entries(parent_pid) {
             let rx = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame{count:1}))
                 .map_err(|_| GenshinError::Service(ServiceError::Other{code:90,msg:"alloc".into()}))?;
-            let resp = rx.recv_timeout(std::time::Duration::from_secs(2))
+            let resp = rx.recv_timeout(std::time::Duration::from_millis(200))
                 .map_err(|_| GenshinError::Service(ServiceError::Other{code:91,msg:"timeout".into()}))?;
             let new_frame = match resp.data() {
                 Some(ResponseData::PhysicalAddr(a)) => *a,
@@ -804,7 +804,7 @@ impl ProcessService {
             if let Ok(rx)=self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage{
                 pid:child_pid, virt:vaddr, phys:new_frame,
                 prot:crate::messaging::MemProt{readable:true,writable:true,executable:!flags.writable}
-            })) { let _=rx.recv_timeout(std::time::Duration::from_secs(2)); }
+            })) { let _=rx.recv_timeout(std::time::Duration::from_millis(200)); }
             // Copy page content
             for o in 0..4096u64 {
                 if let Ok(b)=self._mmu.read_u8(parent_pid, vaddr+o) {
