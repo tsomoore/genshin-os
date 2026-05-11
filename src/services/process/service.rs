@@ -575,7 +575,8 @@ impl ProcessService {
             }
 
             // xv6-style: halt → Zombie (parent or init will reap)
-            if pid != 1 && cpus.get(&pid).map(|c| c.is_halted()).unwrap_or(false) {
+            let is_blocked = self.process_table.lock().unwrap().get(&pid).map(|p| p.lock().ok().map(|pcb| pcb.state.is_blocked()).unwrap_or(false)).unwrap_or(false);
+            if pid != 1 && !is_blocked && cpus.get(&pid).map(|c| c.is_halted()).unwrap_or(false) {
                 self.scheduler.lock().unwrap().remove(pid, 1);
                 if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
                     if let Ok(mut p) = pcb.lock() {
@@ -1266,7 +1267,8 @@ impl ProcessService {
                 .insert(pid, Arc::new(Mutex::new(pcb)));
             self.handle_schedule(pid, 1)?;
             for _ in 0..500 {
-                if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() { break; } } else { break; }
+                let is_blocked = self.process_table.lock().unwrap().get(&pid).map(|p| p.lock().ok().map(|pcb| pcb.state.is_blocked()).unwrap_or(false)).unwrap_or(false);
+                if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() && !is_blocked { break; } } else { break; }
                 let _ = self.handle_timer_interrupt();
             }
             let mut cpus = self.cpus.lock().unwrap();
@@ -1313,7 +1315,8 @@ impl ProcessService {
                     .insert(pid, Arc::new(Mutex::new(pcb)));
                 self.handle_schedule(pid, 1)?;
                 for _ in 0..500 {
-                    if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() { break; } } else { break; }
+                    let is_blocked = self.process_table.lock().unwrap().get(&pid).map(|p| p.lock().ok().map(|pcb| pcb.state.is_blocked()).unwrap_or(false)).unwrap_or(false);
+                    if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() && !is_blocked { break; } } else { break; }
                     let _ = self.handle_timer_interrupt();
                 }
                 let mut cpus = self.cpus.lock().unwrap();
@@ -1345,9 +1348,10 @@ impl ProcessService {
     fn handle_spawn(&self, program: String, params: Vec<u8>, envelope: &Envelope) -> GenshinResult<()> {
         use crate::hardware::{PageFlags, VirtualCPU};
 
-        // Special: dual mode — run two processes concurrently to demo scheduling
-        if program == "dual" {
-            let busy = self.gen_builtin_program("busy", 0);
+        // Special: dual mode — run two processes concurrently
+        if program == "dual" || program.starts_with("dual:") {
+            let prog_name = if program == "dual" { "busy" } else { &program[5..] };
+            let code = self.load_program(prog_name).unwrap_or_else(|| self.gen_builtin_program(prog_name, 0));
             let mut pids = Vec::new();
             for _ in 0..2 {
                 let pid = { let mut n = self.next_pid.lock().unwrap(); let p = *n; *n += 1; p };
@@ -1359,16 +1363,16 @@ impl ProcessService {
                         prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
                     })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
                 }
-                self.write_slice_virt(pid, 0, &busy);
+                self.write_slice_virt(pid, 0, &code);
                 let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
                 cpu.set_pc(0); cpu.set_sp(0xFFFF);
                 { let mut c = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?; c.insert(pid, cpu); }
-                let mut pcb = crate::services::process::PCB::new(pid, "busy".into(), None);
+                let mut pcb = crate::services::process::PCB::new(pid, prog_name.into(), None);
                 pcb.state = ProcessState::Ready;
                 self.process_table.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 61, msg: "table".into() }))?
                     .insert(pid, Arc::new(Mutex::new(pcb)));
                 self.handle_schedule(pid, 1)?;
-                vprintln!("PS: Spawn 'busy' (PID {})", pid);
+                vprintln!("PS: Spawn '{}' (PID {})", prog_name, pid);
                 pids.push((pid, base));
             }
             // Drive scheduler until all processes complete
@@ -1442,7 +1446,8 @@ impl ProcessService {
         self.handle_schedule(pid, 1)?;
 
         for _ in 0..500 {
-            if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() { break; } } else { break; }
+            let is_blocked = self.process_table.lock().unwrap().get(&pid).map(|p| p.lock().ok().map(|pcb| pcb.state.is_blocked()).unwrap_or(false)).unwrap_or(false);
+            if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() && !is_blocked { break; } } else { break; }
             let _ = self.handle_timer_interrupt();
         }
 
