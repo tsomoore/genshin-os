@@ -76,6 +76,9 @@ impl FileService {
     pub fn run(&self) {
         println!("FileService starting...");
 
+        // Import host .asm files into VFS on first boot
+        self.import_host_files("programs", "/programs");
+
         loop {
             match self.receiver.recv() {
                 Ok(envelope) => {
@@ -92,6 +95,47 @@ impl FileService {
                     break;
                 }
             }
+        }
+    }
+
+    /// Import host files into VFS (only if file doesn't exist or is empty)
+    fn import_host_files(&self, host_dir: &str, vfs_dir: &str) {
+        let host_path = std::path::Path::new(host_dir);
+        if !host_path.is_dir() { return; }
+        let entries = match std::fs::read_dir(host_path) {
+            Ok(e) => e, Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if !fname.ends_with(".asm") && !fname.ends_with(".txt") { continue; }
+            let content = match std::fs::read_to_string(entry.path()) {
+                Ok(c) => c, Err(_) => continue,
+            };
+            let vfs_path = format!("{}/{}", vfs_dir, fname);
+            let mut vfs = match self.vfs.lock() { Ok(v) => v, Err(_) => return, };
+            let node = match vfs.lookup_path(&vfs_path) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let inode = { node.lock().unwrap().inode };
+            drop(vfs);
+            use crate::services::file::file::File;
+            use crate::services::file::file::OpenMode;
+            let mut f = File::new(inode, vfs_path.clone(), 0, OpenMode::Write);
+            f.write(content.as_bytes()).ok();
+            if let Ok(disk) = self.disk.lock() {
+                f.sync_to_disk(&disk).ok();
+                if let Some(start) = f.start_sector {
+                    if let Ok(vfs) = self.vfs.lock() {
+                        if let Some(vnode) = vfs.lookup(inode) {
+                            let mut vn = vnode.lock().unwrap();
+                            vn.size = content.len() as u64;
+                            vn.blocks = (0..f.sector_count).map(|i: u32| (start + i) as u64).collect();
+                        }
+                    }
+                }
+            }
+            println!("FileService: imported {}", fname);
         }
     }
 
