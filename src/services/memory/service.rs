@@ -45,6 +45,9 @@ pub struct MemoryService {
     /// Hardware memory reference
     hardware_memory: Arc<Mutex<PhysicalMemory>>,
     mmu: Arc<MMU>,
+
+    /// Track swapped pages: (pid, vaddr) → swap_slot_number
+    swapped_pages: Arc<Mutex<HashMap<Pid, HashMap<VirtAddr, u64>>>>,
 }
 
 impl MemoryService {
@@ -66,7 +69,7 @@ impl MemoryService {
         let swap_disk = VirtualDisk::new(256, ".genshin-swap.img"); // 256 sectors for swap (128KB)
         let swap_manager = Arc::new(Mutex::new(SwapManager::new(SwapConfig::default(), swap_disk)));
         let hardware_memory = Arc::new(Mutex::new(hw));
-        Self { bus, receiver, memory_manager, page_tables, swap_manager, hardware_memory, mmu }
+        Self { bus, receiver, memory_manager, page_tables, swap_manager, hardware_memory, mmu, swapped_pages: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     /// Run the memory service (main loop)
@@ -449,21 +452,89 @@ impl MemoryService {
 
     fn handle_page_fault_with_response(&self, pid: Pid, faulting_addr: VirtAddr, _at: AccessType, envelope: &Envelope) -> GenshinResult<()> {
         vprintln!("MemoryService: Page fault pid {} at {:#x}", pid, faulting_addr);
+        let page_vaddr = faulting_addr & !0xFFF; // align to 4K
+
+        // Step 1: check if page was swapped out
+        {
+            let swapped = self.swapped_pages.lock().unwrap();
+            if let Some(slot) = swapped.get(&pid).and_then(|m| m.get(&page_vaddr)) {
+                vprintln!("MemoryService: swap-in pid {} vaddr {:#x} slot {}", pid, page_vaddr, slot);
+                let data = match self.swap_manager.lock().unwrap().swap_in(*slot) {
+                    Ok(d) => d,
+                    Err(e) => { let _ = envelope.respond_error(MessagingServiceError::Other { code: 80, msg: e }); return Ok(()); }
+                };
+                let mut memory = Self::lock_mutex(&self.memory_manager)?;
+                if let Some(frame) = memory.allocate_frames(pid, 1).first().copied() {
+                    drop(memory);
+                    self.mmu.map_page(pid, page_vaddr, frame.address,
+                        crate::hardware::PageFlags { present: true, writable: true, user_accessible: true }).ok();
+                    for (i, &b) in data.iter().enumerate() {
+                        let _ = self.mmu.write_u8(pid, page_vaddr + i as u64, b);
+                    }
+                    self.swapped_pages.lock().unwrap().entry(pid).or_default().remove(&page_vaddr);
+                    self.swap_manager.lock().unwrap().free_slot(*slot);
+                    let _ = envelope.respond_success(ResponseData::PhysicalAddr(frame.address));
+                    return Ok(());
+                }
+            }
+        }
+
+        // Step 2: try to allocate
         let mut memory = Self::lock_mutex(&self.memory_manager)?;
         let frames = memory.allocate_frames(pid, 1);
-        drop(memory);
-        if let Some(frame) = frames.first() {
+        if let Some(frame) = frames.first().copied() {
+            drop(memory);
             use crate::hardware::PageFlags;
-            self.mmu.map_page(pid, faulting_addr, frame.address,
-                PageFlags { present: true, writable: true, user_accessible: true })
+            self.mmu.map_page(pid, page_vaddr, frame.address,
+                crate::hardware::PageFlags { present: true, writable: true, user_accessible: true })
                 .map_err(|e| GenshinError::Service(ServiceError::Other { code: 70, msg: format!("{:?}", e) }))?;
-            vprintln!("MemoryService: PF handled {:#x} -> {:#x}", faulting_addr, frame.address);
+            vprintln!("MemoryService: PF handled {:#x} -> {:#x}", page_vaddr, frame.address);
             let _ = envelope.respond_success(ResponseData::PhysicalAddr(frame.address));
-            Ok(())
-        } else {
-            let _ = envelope.respond_error(MessagingServiceError::ResourceExhausted { resource: "frames".into() });
-            Err(GenshinError::Service(ServiceError::ResourceExhausted { resource: "frames".into(), available: 0, requested: 1 }))
+            return Ok(());
         }
+        drop(memory);
+
+        // Step 3: no free frames, try swap-out
+        vprintln!("MemoryService: OOM, attempting swap-out");
+        if let Some((vpid, vaddr, vframe)) = self.find_victim_page(pid) {
+            let mut swap = self.swap_manager.lock().unwrap();
+            if let Some(slot) = swap.allocate_slot(vpid, vaddr / 4096) {
+                let mut page_data = vec![0u8; 4096];
+                for i in 0..4096u64 { page_data[i as usize] = self.mmu.read_u8(vpid, vaddr + i).unwrap_or(0); }
+                if swap.swap_out(slot.number, &page_data).is_ok() {
+                    drop(swap);
+                    self.mmu.unmap_page(vpid, vaddr).ok();
+                    let mut mem = Self::lock_mutex(&self.memory_manager)?;
+                    mem.free_frame(vpid, vframe / 4096);
+                    self.swapped_pages.lock().unwrap().entry(vpid).or_default().insert(vaddr, slot.number);
+                    vprintln!("MemoryService: swapped out pid {} vaddr {:#x} slot {}", vpid, vaddr, slot.number);
+                    if let Some(new_frame) = mem.allocate_frames(pid, 1).first().copied() {
+                        drop(mem);
+                        self.mmu.map_page(pid, page_vaddr, new_frame.address,
+                            crate::hardware::PageFlags { present: true, writable: true, user_accessible: true })
+                            .map_err(|e| GenshinError::Service(ServiceError::Other { code: 70, msg: format!("{:?}", e) }))?;
+                        vprintln!("MemoryService: PF handled (after swap) {:#x} -> {:#x}", page_vaddr, new_frame.address);
+                        let _ = envelope.respond_success(ResponseData::PhysicalAddr(new_frame.address));
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        let _ = envelope.respond_error(MessagingServiceError::ResourceExhausted { resource: "frames".into() });
+        Err(GenshinError::Service(ServiceError::ResourceExhausted { resource: "frames".into(), available: 0, requested: 1 }))
+    }
+
+    fn find_victim_page(&self, exclude_pid: Pid) -> Option<(Pid, VirtAddr, PhysAddr)> {
+        let pages = self.mmu.all_present_pages();
+        // Prefer another process's page
+        for &(p, vaddr, frame) in &pages {
+            if p != exclude_pid {
+                return Some((p, vaddr, frame));
+            }
+        }
+        // Fallback: take any page
+        pages.first().copied()
     }
 
     fn handle_swap_out(&self, pid: Pid, virt: VirtAddr) -> GenshinResult<()> {

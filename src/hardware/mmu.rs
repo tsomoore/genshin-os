@@ -153,6 +153,20 @@ impl MMU {
         }
     }
 
+    /// Iterate all present pages across all processes (for victim selection)
+    pub fn all_present_pages(&self) -> Vec<(Pid, VirtAddr, PhysAddr)> {
+        let tables = self.page_tables.lock().unwrap();
+        let mut result = Vec::new();
+        for (&pid, table) in tables.iter() {
+            for (&vaddr, entry) in table.iter() {
+                if entry.flags.present {
+                    result.push((pid, vaddr, entry.frame));
+                }
+            }
+        }
+        result
+    }
+
     /// Map a virtual page to a physical frame
     ///
     /// 曾国藩曰：
