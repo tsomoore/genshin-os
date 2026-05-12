@@ -43,8 +43,11 @@ Genshin-OS 是一个用 Rust 编写的微内核操作系统模拟。核心设计
    │        │        │             │
    ▼        ▼        ▼             ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    硬件模拟层                                │
-│  VirtualCPU │ MMU │ PhysicalMemory │ VirtualDisk │ Timer    │
+│                    硬件模拟层                               │
+│  VirtualCPU │ MMU │ PhysicalMemory │ VirtualDisk │ Timer ★ │
+│                                                             │
+│  Timer (100Hz): 每 10ms 发 Interrupt::Timer，              │
+│  ProcessService 通过 select! 阻塞等待 → 驱动调度器          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -317,6 +320,26 @@ DeviceRequest::RegisterDevice { device_type, name }
 ```
 
 ## 五、关键流程
+
+### 5.0 Timer 驱动调度 (select! 事件循环)
+
+```
+Timer 硬件 (100Hz)
+  │
+  └─→ bus.send(KernelMsg::Interrupt(Interrupt::Timer))
+       │
+       └─→ Kernel 路由 → intr_tx → ProcessService.intr_rx
+                                            │
+                                            ▼
+  select! {
+      recv(intr_rx) → handle_timer_interrupt()  ←─ 调度、页错误、回收
+      recv(receiver) → handle_envelope()         ←─ fork/exec/wait/文件
+  }
+
+每 10ms: intr_rx 就绪 → select! 唤醒 → 逐 CPU round-robin 调度
+进程消息到达: receiver 就绪 → select! 唤醒 → 立即处理
+双重就绪: select! 随机选择 → 公平调度
+```
 
 ### 5.1 进程创建 (fork+exec)
 
