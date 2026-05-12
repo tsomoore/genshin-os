@@ -1679,6 +1679,15 @@ impl ProcessService {
                 }
             }
             // ── Device syscalls ──
+            208 => {
+                // Device open: request clipboard device
+                println!("[DEVICE] pid={} requests clipboard", pid);
+                cpu.write_register(crate::hardware::Register::R1, 0); // device_id = 0
+            }
+            209 => {
+                // Device close: release clipboard device
+                println!("[DEVICE] pid={} releases clipboard", pid);
+            }
             210 => {
                 let max_size = r1 as usize;
                 if let Ok(rx) = self.bus.send_request(KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardGet { max_size })) {
