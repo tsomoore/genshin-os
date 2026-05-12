@@ -1,6 +1,6 @@
 // Genshin-OS Main Entry Point
 
-use genshin_os::hardware::{MMU, PhysicalMemory};
+use genshin_os::hardware::{MMU, PhysicalMemory, Timer, TimerConfig};
 use genshin_os::services::device::DeviceService;
 use genshin_os::services::file::FileService;
 use genshin_os::services::kernel::Kernel;
@@ -17,6 +17,10 @@ fn main() {
     let mmu = Arc::new(MMU::new(hw_memory.clone(), 4096));
     let bus = Arc::new(LockedBus::new());
     println!("\u{2713} Hardware + Message bus");
+
+    // Start hardware timer (drives process scheduler)
+    let timer = Timer::new(bus.clone(), TimerConfig { tick_interval_ms: 10, auto_start: true });
+    println!("\u{2713} Timer (hardware, 100 Hz)");
 
     // Kernel owns the bus subscription, creates service channels
     let (kernel, prx, irx, mrx, frx) = Kernel::new(bus.clone());

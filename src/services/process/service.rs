@@ -108,25 +108,30 @@ impl ProcessService {
         }
 
         loop {
-            // try_recv + sleep: guaranteed to drive timer every 10ms
+            // Check both process channel AND interrupt channel (for Timer)
             match self.receiver.try_recv() {
                 Ok(envelope) => {
                     if let Err(e) = self.handle_envelope(envelope) {
                         eprintln!("ProcessService error: {}", e);
                     }
                     self.process_pending_forks();
-                    let _ = self.handle_timer_interrupt();
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    self.process_pending_forks();
-                    let _ = self.handle_timer_interrupt();
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     eprintln!("Message bus disconnected");
                     break;
                 }
             }
+            // Always check for hardware interrupts (Timer drives scheduler)
+            while let Ok(env) = self.intr_rx.try_recv() {
+                if let KernelMsg::Interrupt(_) = &env.message {
+                    // Timer interrupt → drive scheduler
+                }
+            }
+            self.process_pending_forks();
+            let _ = self.handle_timer_interrupt();
         }
     }
 
