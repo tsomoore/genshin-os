@@ -108,7 +108,18 @@ impl ProcessService {
         }
 
         loop {
-            // Check both process channel AND interrupt channel (for Timer)
+            // Hardware Timer drives the scheduler via intr_rx
+            let mut ticked = false;
+            while let Ok(env) = self.intr_rx.try_recv() {
+                if matches!(&env.message, KernelMsg::Interrupt(_)) {
+                    ticked = true;
+                }
+            }
+            if ticked {
+                self.handle_timer_interrupt().ok();
+            }
+
+            // Process messages from Kernel
             match self.receiver.try_recv() {
                 Ok(envelope) => {
                     if let Err(e) = self.handle_envelope(envelope) {
@@ -117,21 +128,16 @@ impl ProcessService {
                     self.process_pending_forks();
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    // No messages — brief yield to avoid busy-loop
+                    if !ticked {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
                 }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     eprintln!("Message bus disconnected");
                     break;
                 }
             }
-            // Always check for hardware interrupts (Timer drives scheduler)
-            while let Ok(env) = self.intr_rx.try_recv() {
-                if let KernelMsg::Interrupt(_) = &env.message {
-                    // Timer interrupt → drive scheduler
-                }
-            }
-            self.process_pending_forks();
-            let _ = self.handle_timer_interrupt();
         }
     }
 
