@@ -19,7 +19,7 @@ fn main() {
     println!("\u{2713} Hardware + Message bus");
 
     // Start hardware timer (drives process scheduler)
-    let timer = Timer::new(bus.clone(), TimerConfig { tick_interval_ms: 10, auto_start: true });
+    let timer = Arc::new(Timer::new(bus.clone(), TimerConfig { tick_interval_ms: 10, auto_start: true }));
     println!("\u{2713} Timer (hardware, 100 Hz)");
 
     // Kernel owns the bus subscription, creates service channels
@@ -64,7 +64,7 @@ fn main() {
     });
     println!("\u{2713} Device service");
 
-    let mut shell = Shell::new(bus);
+    let mut shell = Shell::new(bus, timer);
     println!("\u{2713} Shell\n");
     shell.run_interactive();
 }

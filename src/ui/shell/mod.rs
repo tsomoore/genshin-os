@@ -7,6 +7,7 @@ pub mod parser;
 pub mod builtins;
 
 use crate::messaging::{MessageBus, KernelMsg, Pid, Response, ResponseData, ProcessRequest};
+use crate::hardware::Timer;
 use crate::ui::UIContext;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,10 +43,11 @@ pub struct Shell {
     builtins: BuiltinCommand,
     cwd: String,
     running: bool,
+    timer: Arc<Timer>,
 }
 
 impl Shell {
-    pub fn new(bus: Arc<dyn MessageBus>) -> Self {
+    pub fn new(bus: Arc<dyn MessageBus>, timer: Arc<Timer>) -> Self {
         let context = UIContext::new(bus);
         Self {
             context,
@@ -54,10 +56,11 @@ impl Shell {
             builtins: BuiltinCommand::new(),
             cwd: "/".to_string(),
             running: false,
+            timer,
         }
     }
 
-    pub fn with_config(bus: Arc<dyn MessageBus>, config: ShellConfig) -> Self {
+    pub fn with_config(bus: Arc<dyn MessageBus>, config: ShellConfig, timer: Arc<Timer>) -> Self {
         let context = UIContext::new(bus);
         Self {
             context,
@@ -66,6 +69,7 @@ impl Shell {
             builtins: BuiltinCommand::new(),
             cwd: "/".to_string(),
             running: false,
+            timer,
         }
     }
 
@@ -266,6 +270,12 @@ impl Shell {
                 let on = command.args.first().map(|s| s.as_str()).unwrap_or("on");
                 crate::verbose::set_verbose(on == "on");
                 println!("verbose: {}", if on == "on" { "on" } else { "off" });
+                Ok(())
+            }
+            "uptime" => {
+                let ticks = self.timer.tick_count();
+                let ms = (ticks as f64 * 10.0) / 1000.0;
+                println!("+{} ticks | {:.2}s", ticks, ms);
                 Ok(())
             }
             "pwd" => {
