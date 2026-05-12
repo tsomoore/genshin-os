@@ -108,34 +108,32 @@ impl ProcessService {
         }
 
         loop {
-            // Hardware Timer drives the scheduler via intr_rx
-            let mut ticked = false;
-            while let Ok(env) = self.intr_rx.try_recv() {
-                if matches!(&env.message, KernelMsg::Interrupt(_)) {
-                    ticked = true;
+            // Block on BOTH channels: Timer interrupts drive scheduling,
+            // process messages handled on arrival. No polling, no sleep.
+            crossbeam_channel::select! {
+                recv(self.intr_rx) -> env => {
+                    // Timer interrupt → heartbeat: drive scheduler
+                    if let Ok(env) = env {
+                        if matches!(&env.message, KernelMsg::Interrupt(_)) {
+                            self.handle_timer_interrupt().ok();
+                        }
+                    }
                 }
-            }
-            if ticked {
-                self.handle_timer_interrupt().ok();
-            }
 
-            // Process messages from Kernel
-            match self.receiver.try_recv() {
-                Ok(envelope) => {
-                    if let Err(e) = self.handle_envelope(envelope) {
-                        eprintln!("ProcessService error: {}", e);
+                recv(self.receiver) -> env => {
+                    // Process message from Kernel → handle immediately
+                    match env {
+                        Ok(envelope) => {
+                            if let Err(e) = self.handle_envelope(envelope) {
+                                eprintln!("ProcessService error: {}", e);
+                            }
+                            self.process_pending_forks();
+                        }
+                        Err(_) => {
+                            eprintln!("Message bus disconnected");
+                            return;
+                        }
                     }
-                    self.process_pending_forks();
-                }
-                Err(crossbeam_channel::TryRecvError::Empty) => {
-                    // No messages — brief yield to avoid busy-loop
-                    if !ticked {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                }
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    eprintln!("Message bus disconnected");
-                    break;
                 }
             }
         }
