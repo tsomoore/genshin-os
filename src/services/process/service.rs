@@ -1504,7 +1504,36 @@ impl ProcessService {
         let path = self.read_string_virt(pid, 0x100);
         use crate::messaging::{FileRequest, OpenFlags, ResponseData};
         match r0 {
-            0 => { if pid != 1 { cpu.halt(); } /* init never halts */ },
+            0 => {
+                if pid == 1 { return; } // init never exits
+                let exit_code = r1 as i32;
+
+                // 1. Unmap and free all pages
+
+                // 2. Unmap and free all pages
+                let entries = self._mmu.get_page_entries(pid);
+                let frame_count = entries.len();
+                vprintln!("PS: exit({}) pid={} — freeing {} pages", exit_code, pid, frame_count);
+                for (vaddr, paddr, _) in &entries {
+                    self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: *vaddr })).ok();
+                    self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: *paddr })).ok();
+                }
+
+                // 3. Mark as Zombie with exit code
+                if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
+                    if let Ok(mut p) = pcb.lock() {
+                        p.state = ProcessState::Zombie { exit_code };
+                    }
+                }
+
+                // 4. Remove from scheduler
+                self.scheduler.lock().unwrap().block(pid, 1);
+
+                // 5. Halt CPU
+                cpu.halt();
+
+                vprintln!("PS: PID {} exited with code {}", pid, exit_code);
+            },
             1 => println!("[PRINT] {}", r1 as i64),
             2 => {
                 let data = self.read_bytes_virt(pid, r1, r2 as usize);
