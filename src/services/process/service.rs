@@ -1678,6 +1678,25 @@ impl ProcessService {
                     mutex.release(pid);
                 }
             }
+            // ── Device syscalls ──
+            210 => {
+                let max_size = r1 as usize;
+                if let Ok(rx) = self.bus.send_request(KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardGet { max_size })) {
+                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                        if let Some(ResponseData::Bytes(data)) = resp.data() {
+                            for (i, &b) in data.iter().enumerate() {
+                                let _ = self._mmu.write_u8(pid, 0x200 + i as u64, b);
+                            }
+                            cpu.write_register(crate::hardware::Register::R2, data.len() as u64);
+                        }
+                    }
+                }
+            }
+            211 => {
+                let size = r2 as usize;
+                let data = self.read_bytes_virt(pid, 0x200, size);
+                self.bus.send(KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardSet { data })).ok();
+            }
             _ => {}
         }
     }
