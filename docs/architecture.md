@@ -16,10 +16,12 @@ Genshin-OS 是一个用 Rust 编写的微内核操作系统模拟。核心设计
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      Shell (用户界面)                        │
-│  ls / touch / mkdir / cat / write / rm / tree / pstree     │
-│  minigdb / copy / paste / fork / exec / dual / run         │
+│  ls / mkdir / touch / cat / write / rm / tree / pstree     │
+│  minigdb / dual / run / pmon / fork / exec / uptime        │
 │                                                             │
-│  每个命令: fork(1) → exec(child, program, args) → wait(N)  │
+│  dual/run: fire-and-forget（发完即返，进程 Timer 驱动）     │
+│  文件命令: fork(1) → exec(child, program, args) → wait(N)  │
+│  pmon: TUI 实时进程/内存/磁盘监控面板 (ratatui)             │
 └────────────────────────────┬────────────────────────────────┘
                              │ KernelMsg::Process / File / ...
                              ▼
@@ -334,14 +336,24 @@ Timer 硬件 (100Hz)
   select! {
       recv(intr_rx) → handle_timer_interrupt()  ←─ 调度、页错误、回收
       recv(receiver) → handle_envelope()         ←─ fork/exec/wait/文件
-  }
-
-每 10ms: intr_rx 就绪 → select! 唤醒 → 逐 CPU round-robin 调度
-进程消息到达: receiver 就绪 → select! 唤醒 → 立即处理
-双重就绪: select! 随机选择 → 公平调度
+  双重就绪: select! 随机选择 → 公平调度
 ```
 
-### 5.1 进程创建 (fork+exec)
+**系统监控**: `pmon` 命令通过 `ProcessRequest::GetStats` / `MemoryRequest::GetStats` / `FileRequest::DiskInfo` 查询系统状态，每 250ms 刷新一次 TUI 面板。
+
+### 5.1 进程创建 (统一 fork+exec 流水线)
+
+所有进程创建均通过 `fork_impl(0)` + `exec_impl(pid, name, args)` 两条指令:
+- `fork_impl(0)` → 分配 PID、创建 CPU、PCB，子进程 R0=0
+- `exec_impl` → 加载程序 (.asm 汇编或内置)、建立页表映射、重置 PC/SP
+- `handle_schedule` → 加入就绪队列，Timer 驱动调度
+
+调用方:
+- Shell `ls`/`cat` 等: fork_exec_wait → ForkProcess + ExecProcess + WaitChild
+- Shell `run`/`dual`: Spawn (fire-and-forget) → ProcessService 内部 fork_impl + exec_impl
+- CPU INT 0x80 R0=100: fork_impl 直接调用（同步，子进程立即调度）
+
+### 5.2 文件命令流程 (fork+exec+wait)
 
 ```
 Shell: ls
@@ -381,7 +393,7 @@ Shell: ls
       → reap_process → 清理                              │
 ```
 
-### 5.2 文件写入流程
+### 5.3 文件写入流程
 
 ```
 write /hello.txt world
@@ -407,7 +419,7 @@ write /hello.txt world
         → UnmapPage + FreeFrame + Zombie
 ```
 
-### 5.3 信号量互斥 (dual rwlock)
+### 5.4 信号量互斥 (dual rwlock)
 
 ```
 dual rwlock → 创建 2 个进程，共享全局信号量 ID=0

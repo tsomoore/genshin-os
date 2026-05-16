@@ -48,6 +48,7 @@ flowchart LR
 | `false` | 无 | 总是返回失败 |
 | `:` | 无 | 空命令（no-op） |
 | `uptime` | 无 | 显示硬件 Timer tick 计数和运行时间 |
+| `pmon` / `htop` | 无 | 打开全屏 TUI 进程/内存/磁盘监控面板 (q 退出) |
 ### 文件系统命令
 
 | 命令 | 参数 | 说明 |
@@ -67,54 +68,87 @@ flowchart LR
 
 ---
 
+## 📊 系统监控命令
+
+| 命令 | 参数 | 说明 |
+|------|------|------|
+| `pmon` / `htop` | 无 | 全屏 TUI 实时监控面板，显示进程表、内存/磁盘用量 |
+| `uptime` | 无 | 显示硬件 Timer tick 计数和系统运行时间 |
+| `pstree` / `ps` | 无 | 显示进程树（PID、状态、名称、父子关系） |
+
+### `pmon` — 系统监控面板
+
+仿 Linux `htop` 的全屏终端监控仪表盘：
+- **进程面板**: PID / STATE / NAME / PPID，颜色标注状态
+  - 🟢 Running　🟡 Blocked　🔵 Ready　🔴 Zombie
+- **内存面板**: 物理帧用量进度条 (used / free / total)
+- **磁盘面板**: .genshin-disk.img 扇区用量进度条
+- 按 `q` 或 `Esc` 退出，返回 Shell
+
+```
+genshin-os:/> dual rwlock    ← 创建两个信号量互斥进程
+genshin-os:/> run busy        ← 再加一个 CPU 密集型进程
+genshin-os:/> pmon            ← 打开监控，实时观察并发调度
+```
+
+---
+
+## 🧬 进程管理命令
+
 ## 🧬 进程管理命令
 
 进程命令通过 **MessageBus** 发送 `KernelMsg::Process(ProcessRequest::...)` 或 `KernelMsg::Syscall(Syscall::...)` 至后台 `ProcessService`。
 
-### `run` — 创建进程
+### `run` — 创建并启动进程（fire-and-forget）
+
+`run` 通过 `ProcessRequest::Spawn` 发送异步消息，立即返回。
+进程由 Timer 驱动调度，在后台并发运行。
 
 ```
-run <executable> [args...]
+run <program> [args...]
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `executable` | String | 可执行文件路径 |
+| `program` | String | programs/<name>.asm 中的程序名 |
 | `args` | Vec\<String\> | 命令行参数（可选） |
 
 **对应的 KernelMsg**:
 ```rust
-KernelMsg::Syscall(Syscall::CreateProcess {
-    executable: "/bin/init".to_string(),
-    args: vec!["--daemon".to_string()],
+KernelMsg::Process(ProcessRequest::Spawn {
+    program: "busy".to_string(),
+    params: vec![],
 })
 ```
 
-**执行流程**:
-```mermaid
-sequenceDiagram
-    accTitle: run 命令执行流程
-    accDescr: 展示 Shell 执行 run 命令后，ProcessService 创建 PCB、注册到进程表并加入调度器的完整流程。
-
-    Shell->>Bus: Syscall::CreateProcess
-    Bus->>PS: Envelope
-    activate PS
-    PS->>PS: next_pid += 1 → 分配 PID
-    PS->>PCB: PCB::new(pid, name, None)
-    PS->>Table: process_table.insert(pid, pcb)
-    PS->>Sched: scheduler.ready(pid, tid, priority)
-    Note over PS: 日志: "Created process N (/bin/...)"
-    deactivate PS
+**程序类型**:
+- `.asm` 汇编文件: 从 `programs/<name>.asm` 加载
+- 内置程序: busy, idle, rwlock, loop 等（gen_builtin_program 生成）
+})
 ```
+
+**执行流程**: fire-and-forget → Kernel → ProcessService → fork_impl(0) → exec_impl → handle_schedule → 进程进入就绪队列，Timer 驱动调度
 
 **用法示例**:
 ```bash
-chao-os> run /bin/init --daemon
-chao-os> run /bin/shell --interactive
-chao-os> run /bin/worker --pool-size=4
+genshin-os:/> run busy       # CPU 密集型（15条 MOV）
+genshin-os:/> run loop       # 永不停止的循环（ADD+JNZ）
+genshin-os:/> run rwlock     # 信号量互斥（sem_wait/sem_signal）
 ```
 
-**输出**: `ProcessService: Created process 1 (/bin/init)`
+---
+
+### `dual` — 双进程并发（信号量互斥演示）
+
+`dual <program>` 创建 **两个** 同程序的进程，模拟并发竞争。
+配合 `pmon` 可以看到进程在 CPU 间切换、阻塞/唤醒。
+
+```bash
+genshin-os:/> dual rwlock    # 2 个 rwlock 进程争用信号量 0
+genshin-os:/> dual loop      # 2 个无限循环进程（纯并发）
+```
+
+`dual rwlock` 输出 `[` 和 `]` 交替打印，证明互斥正确。
 
 ---
 
