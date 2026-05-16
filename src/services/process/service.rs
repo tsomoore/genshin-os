@@ -280,7 +280,15 @@ impl ProcessService {
             ProcessRequest::ListProcesses => {
                 self.handle_list_processes()?;
             }
-            ProcessRequest::Spawn { .. } => {}
+            ProcessRequest::Spawn { program, .. } => {
+                let pname = if program == "dual" { "busy" } else if program.starts_with("dual:") { &program[5..] } else { &program };
+                let count = if program.starts_with("dual") { 2 } else { 1 };
+                for _ in 0..count {
+                    if let Ok(child) = self.fork_impl(0) {
+                        let _ = self.exec_impl(child, pname.to_string(), vec![]);
+                    }
+                }
+            }
 
             ProcessRequest::GetStats => {} // handled via response path
         }

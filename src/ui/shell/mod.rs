@@ -339,7 +339,7 @@ impl Shell {
                 let prog = command.args.get(0).map(|s| s.as_str()).unwrap_or("busy");
                 let pname = if prog == "busy" { "dual".into() } else { format!("dual:{}", prog) };
                 let msg = KernelMsg::Process(ProcessRequest::Spawn { program: pname, params: vec![] });
-                let _ = self.send_and_wait(msg)?;
+                self.context.send(msg);  // fire-and-forget: processes run via timer
                 Ok(())
             }
             "fork" => {
@@ -463,11 +463,10 @@ impl Shell {
             "run" => {
                 let prog = command.args.get(0).ok_or_else(|| "run: missing program name")?;
                 let args: Vec<String> = command.args.iter().skip(1).cloned().collect();
-                let msg = KernelMsg::Syscall(crate::messaging::Syscall::CreateProcess {
-                    executable: prog.clone(),
-                    args,
+                let msg = KernelMsg::Process(ProcessRequest::Spawn {
+                    program: prog.clone(), params: vec![],
                 });
-                let _ = self.send_and_wait(msg)?;
+                self.context.send(msg);  // fire-and-forget: processes run via timer
                 println!("run: started '{}'", prog);
                 Ok(())
             }
