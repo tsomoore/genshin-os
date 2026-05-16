@@ -56,6 +56,13 @@ pub enum ResponseData {
     /// Integer value
     Integer(u64),
 
+    /// Memory statistics
+    MemoryStats {
+        total_frames: u64,
+        used_frames: u64,
+        free_frames: u64,
+    },
+
     /// String value
     String(String),
 
@@ -82,6 +89,9 @@ impl fmt::Display for ResponseData {
             Self::StringList(list) => write!(f, "[{}]", list.join(", ")),
             Self::DiskStats { total_sectors, used_sectors, .. } => {
                 write!(f, "Disk({}/{} sectors)", used_sectors, total_sectors)
+            }
+            Self::MemoryStats { total_frames, used_frames, free_frames } => {
+                write!(f, "Mem({}/{}/{})", used_frames, free_frames, total_frames)
             }
         }
     }

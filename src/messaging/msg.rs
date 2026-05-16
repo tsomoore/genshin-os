@@ -275,6 +275,9 @@ pub enum ProcessRequest {
 
     /// List all processes
     ListProcesses,
+
+    /// Get system stats for TUI monitor
+    GetStats,
 }
 
 /// Reason for a thread being blocked
@@ -319,6 +322,9 @@ pub enum MemoryRequest {
 
     /// Swap in page from disk
     SwapIn { pid: Pid, virt: VirtAddr },
+
+    /// Get memory stats for TUI monitor
+    GetStats,
 }
 
 /// File system service requests

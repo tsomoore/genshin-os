@@ -159,6 +159,8 @@ impl MemoryService {
             MemoryRequest::SwapIn { pid, virt } => {
                 self.handle_swap_in(pid, virt)?;
             }
+
+            MemoryRequest::GetStats => {} // via response
         }
 
         Ok(())
@@ -197,6 +199,19 @@ impl MemoryService {
 
             MemoryRequest::SwapIn { pid, virt } => {
                 self.handle_swap_in_with_response(pid, virt, envelope)?;
+            }
+
+            MemoryRequest::GetStats => {
+                let mm = self.memory_manager.lock().unwrap();
+                let alloc = mm.allocator();
+                let total = alloc.total_frames();
+                let free = alloc.free_count();
+                let used = total - free;
+                let _ = envelope.respond_success(ResponseData::MemoryStats {
+                    total_frames: total,
+                    used_frames: used,
+                    free_frames: free,
+                });
             }
         }
 

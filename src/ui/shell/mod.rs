@@ -5,7 +5,6 @@
 
 pub mod parser;
 pub mod builtins;
-
 use crate::messaging::{MessageBus, KernelMsg, Pid, Response, ResponseData, ProcessRequest};
 use crate::hardware::Timer;
 use crate::ui::UIContext;
@@ -276,6 +275,16 @@ impl Shell {
                 let ticks = self.timer.tick_count();
                 let ms = (ticks as f64 * 10.0) / 1000.0;
                 println!("+{} ticks | {:.2}s", ticks, ms);
+                Ok(())
+            }
+            "pmon" | "htop" => {
+                let bus = self.context.bus.clone();
+                let timer = self.timer.clone();
+                println!("Launching process monitor...");
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                if let Err(e) = crate::ui::monitor::run_monitor(bus, timer) {
+                    eprintln!("Monitor error: {}", e);
+                }
                 Ok(())
             }
             "pwd" => {
@@ -576,6 +585,9 @@ impl Shell {
         println!("  Hardware:");
         println!("    cpu                    CPU instruction demo");
         println!("    mem                    PhysicalMemory hex dump");
+        println!("  Monitoring:");
+        println!("    pmon | htop            Live TUI process/memory/disk monitor (q to quit)");
+        println!("    uptime                 Show hardware timer ticks");
         println!("  System:");
         println!("    echo <text>            Print text to stdout");
         println!("    clear                  Clear the screen");

@@ -281,6 +281,8 @@ impl ProcessService {
                 self.handle_list_processes()?;
             }
             ProcessRequest::Spawn { .. } => {}
+
+            ProcessRequest::GetStats => {} // handled via response path
         }
 
         Ok(())
@@ -304,6 +306,33 @@ impl ProcessService {
 
             ProcessRequest::GetProcessInfo { pid } => {
                 self.handle_get_process_info_with_response(pid, envelope)?;
+            }
+
+            ProcessRequest::GetStats => {
+                // Collect process table for TUI monitor
+                let table = Self::lock_mutex(&self.process_table)?;
+                let parent_children = Self::lock_mutex(&self.parent_children)?;
+                let mut lines: Vec<String> = Vec::new();
+                let mut pids: Vec<Pid> = table.keys().cloned().collect();
+                pids.sort();
+                for pid in pids {
+                    if let Some(pcb) = table.get(&pid) {
+                        if let Ok(pcb) = pcb.lock() {
+                            let state = format!("{:?}", pcb.state)
+                                .replace("ProcessState::", "")
+                                .replace("Zombie { exit_code: ", "Zombie(")
+                                .replace(" }", ")")
+                                .replace("Blocked(", "Blocked");
+                            let ppid = parent_children.iter()
+                                .find(|(p, _)| **p == pid)
+                                .map(|(_, _)| "-")
+                                .unwrap_or("-");
+                            let ppid_str = pcb.parent_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+                            lines.push(format!("{:>4} {:>12} {:<20} {:>4}", pid, state, pcb.name, ppid_str));
+                        }
+                    }
+                }
+                let _ = envelope.respond_success(ResponseData::StringList(lines));
             }
 
             ProcessRequest::ListProcesses => {
@@ -1214,7 +1243,7 @@ impl ProcessService {
     }
 
     fn format_tree(&self, procs: &[(Pid, String, String, Option<Pid>)], pid: Pid, prefix: &str, is_last: bool, output: &mut String) {
-        let info = procs.iter().find(|(p,_,_,_)| *p == pid);
+        let info = procs.iter().find(|(p,_,_,_)| p == &pid);
         if let Some((_, name, state, _)) = info {
             let connector = if is_last { "└── " } else { "├── " };
             output.push_str(&format!("{}{}PID {} [{}] {}\n", prefix, connector, pid, state, name));

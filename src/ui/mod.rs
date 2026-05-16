@@ -5,6 +5,7 @@
 // - TUI Monitor: Text-based system monitoring dashboard
 
 pub mod shell;
+pub mod monitor;
 
 // Re-export shell for convenience
 pub use shell::{Shell, ShellConfig};
