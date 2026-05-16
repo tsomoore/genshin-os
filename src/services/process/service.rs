@@ -127,7 +127,6 @@ impl ProcessService {
                             if let Err(e) = self.handle_envelope(envelope) {
                                 eprintln!("ProcessService error: {}", e);
                             }
-                            self.process_pending_forks();
                         }
                         Err(_) => {
                             eprintln!("Message bus disconnected");
@@ -913,13 +912,17 @@ impl ProcessService {
         pcb.state = ProcessState::Ready;
         self.process_table.lock().unwrap().insert(child_pid, Arc::new(Mutex::new(pcb)));
 
-        // Parent-child link (don't schedule child — exec will do it)
+        // Parent-child link
         {Self::lock_mutex(&self.parent_children)?.entry(parent_pid).or_default().push(child_pid);}
-        // schedule deferred to exec_impl (child may be empty until exec loads code)
-        vprintln!("PS: Fork {} -> {} (ready, will run after exec)", parent_pid, child_pid);
+        // Clone file descriptors (Unix fork inheritance)
+        let _ = self.bus.send_request(KernelMsg::File(crate::messaging::FileRequest::CloneFds {
+            from_pid: parent_pid, to_pid: child_pid,
+        })).map(|rx| rx.recv_timeout(std::time::Duration::from_millis(100)));
+        // Schedule child immediately — runs from parent's PC with R0=0
+        self.handle_schedule(child_pid, 1)?;
+        vprintln!("PS: Fork {} -> {} (child scheduled, R0=0)", parent_pid, child_pid);
         Ok(child_pid)
     }
-
     /// Process pending fork requests (called from main loop, not timer)
     fn process_pending_forks(&self) {
         let pids: Vec<Pid> = {
@@ -1250,217 +1253,21 @@ impl ProcessService {
     }
 
     fn create_process(&self, executable: &str, args: Vec<String>) -> GenshinResult<Pid> {
-        let mut next_pid = self.next_pid.lock().map_err(|e| {
-            GenshinError::Service(ServiceError::InvalidArguments { param: "lock".into(), reason: format!("{}", e) })
-        })?;
-        let pid = *next_pid; *next_pid += 1; drop(next_pid);
-
-        if let Some(code) = self.load_program(executable) {
-            let frame_count = (code.len() + 4095) / 4096;
-            let frames = self.alloc_frames(frame_count)?;
-            let base = frames[0];
-            use crate::hardware::VirtualCPU;
-            for (i, &addr) in frames.iter().enumerate() {
-                if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
-                    pid, virt: (i * 4096) as u64, phys: addr,
-                    prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
-                })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
-            }
-            self.write_slice_virt(pid, 0, &code);
-            let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
-            cpu.set_pc(0); cpu.set_sp(0xFFFF);
-            { let mut c = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?; c.insert(pid, cpu); }
-            let mut pcb = PCB::new(pid, executable.to_string(), None);
-            pcb.args = args; pcb.state = ProcessState::Ready;
-            self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
-                .insert(pid, Arc::new(Mutex::new(pcb)));
-            self.handle_schedule(pid, 1)?;
-            for _ in 0..500 {
-                let is_blocked = self.process_table.lock().unwrap().get(&pid).map(|p| p.lock().ok().map(|pcb| pcb.state.is_blocked()).unwrap_or(false)).unwrap_or(false);
-                if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() && !is_blocked { break; } } else { break; }
-                let _ = self.handle_timer_interrupt();
-            }
-            let mut cpus = self.cpus.lock().unwrap();
-            if let Some(cpu) = cpus.remove(&pid) {
-                vprintln!("PS: '{}' done after {} instructions", executable, cpu.dump_state().instruction_count);
-            }
-            drop(cpus);
-            {
-                let mut scheduler = self.scheduler.lock().unwrap();
-                scheduler.remove(pid, 1);
-            }
-            {
-                let mut table = self.process_table.lock().unwrap();
-                if let Some(pcb_arc) = table.remove(&pid) {
-                    if let Ok(mut pcb) = pcb_arc.lock() {
-                        pcb.state = ProcessState::Terminated { exit_code: 0 };
-                    }
-                }
-            }
-            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
-            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
-        } else {
-            // Check if it's a built-in program
-            let builtin = self.gen_builtin_program(executable, 0);
-            if builtin[0] != 0xFF {
-                // Run built-in program inline (same as if branch)
-                let frame_count = (builtin.len() + 4095) / 4096;
-                let frames = self.alloc_frames(frame_count)?;
-                let base = frames[0];
-                use crate::hardware::VirtualCPU;
-                for (i, &addr) in frames.iter().enumerate() {
-                    if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
-                        pid, virt: (i * 4096) as u64, phys: addr,
-                        prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
-                    })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
-                }
-                self.write_slice_virt(pid, 0, &builtin);
-                let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
-                cpu.set_pc(0); cpu.set_sp(0xFFFF);
-                { let mut c = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?; c.insert(pid, cpu); }
-                let mut pcb = PCB::new(pid, executable.to_string(), None);
-                pcb.args = args; pcb.state = ProcessState::Ready;
-                self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
-                    .insert(pid, Arc::new(Mutex::new(pcb)));
-                self.handle_schedule(pid, 1)?;
-                for _ in 0..500 {
-                    let is_blocked = self.process_table.lock().unwrap().get(&pid).map(|p| p.lock().ok().map(|pcb| pcb.state.is_blocked()).unwrap_or(false)).unwrap_or(false);
-                    if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() && !is_blocked { break; } } else { break; }
-                    let _ = self.handle_timer_interrupt();
-                }
-                let mut cpus = self.cpus.lock().unwrap();
-                if let Some(cpu) = cpus.remove(&pid) {
-                    vprintln!("PS: '{}' done after {} instructions", executable, cpu.dump_state().instruction_count);
-                }
-                drop(cpus);
-                { let mut s = self.scheduler.lock().unwrap(); s.remove(pid, 1); }
-                {
-                    let mut table = self.process_table.lock().unwrap();
-                    if let Some(p) = table.remove(&pid) {
-                        if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Terminated { exit_code: 0 }; }
-                    }
-                }
-                self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
-                self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
-            } else {
-                let mut pcb = PCB::new(pid, executable.to_string(), None);
-                pcb.args = args;
-                self.process_table.lock().map_err(|e| GenshinError::Service(ServiceError::InvalidArguments { param: "table".into(), reason: format!("{}", e) }))?
-                    .insert(pid, Arc::new(Mutex::new(pcb)));
-                self.handle_schedule(pid, 1)?;
-                vprintln!("PS: Created {} (no code)", pid);
-            }
-        }
-        Ok(pid)
+        // Unix-style: fork + exec into a single create
+        let child_pid = self.fork_impl(0)?;
+        self.exec_impl(child_pid, executable.to_string(), args)?;
+        vprintln!("PS: Created {} (PID {})", executable, child_pid);
+        Ok(child_pid)
     }
 
     fn handle_spawn(&self, program: String, params: Vec<u8>, envelope: &Envelope) -> GenshinResult<()> {
-        use crate::hardware::{PageFlags, VirtualCPU};
-
-        // Special: dual mode — run two processes concurrently
-        if program == "dual" || program.starts_with("dual:") {
-            let prog_name = if program == "dual" { "busy" } else { &program[5..] };
-            let code = self.load_program(prog_name).unwrap_or_else(|| self.gen_builtin_program(prog_name, 0));
-            let mut pids = Vec::new();
-            for _ in 0..2 {
-                let pid = { let mut n = self.next_pid.lock().unwrap(); let p = *n; *n += 1; p };
-                let frames = self.alloc_frames(1)?;
-                let base = frames[0];
-                for (i, &addr) in frames.iter().enumerate() {
-                    if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
-                        pid, virt: (i * 4096) as u64, phys: addr,
-                        prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
-                    })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
-                }
-                self.write_slice_virt(pid, 0, &code);
-                let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
-                cpu.set_pc(0); cpu.set_sp(0xFFFF);
-                { let mut c = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?; c.insert(pid, cpu); }
-                let mut pcb = crate::services::process::PCB::new(pid, prog_name.into(), None);
-                pcb.state = ProcessState::Ready;
-                self.process_table.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 61, msg: "table".into() }))?
-                    .insert(pid, Arc::new(Mutex::new(pcb)));
-                self.handle_schedule(pid, 1)?;
-                vprintln!("PS: Spawn '{}' (PID {})", prog_name, pid);
-                pids.push((pid, base));
-            }
-            // Respond immediately — processes run via timer, reaper cleans up
-            let _ = envelope.respond_success(ResponseData::Void);
-            return Ok(());
+        let pname = if program == "dual" { "busy" } else if program.starts_with("dual:") { &program[5..] } else { &program };
+        let count = if program.starts_with("dual") { 2 } else { 1 };
+        for _ in 0..count {
+            let child = self.fork_impl(0)?;
+            self.exec_impl(child, pname.to_string(), vec![])?;
         }
-
-        let pid = { let mut n = self.next_pid.lock().unwrap(); let p = *n; *n += 1; p };
-
-        let p_len = params.len();
-        let prog = self.gen_builtin_program(&program, p_len);
-        let total = prog.len() + params.len() + 0x200;
-        let frame_count = (total + 4095) / 4096;
-        let frames = self.alloc_frames(frame_count)?;
-        let base = frames[0];
-
-        for (i, &addr) in frames.iter().enumerate() {
-            if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
-                pid, virt: (i * 4096) as u64, phys: addr,
-                prot: crate::messaging::MemProt { readable: true, writable: true, executable: true },
-            })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(2)); }
-        }
-
-        // Write params
-        if !params.is_empty() {
-            if let Some(null_pos) = params.iter().position(|&b| b == 0) {
-                self.write_slice_virt(pid, 0x100, &params[..null_pos]);
-                if null_pos + 1 < params.len() {
-                    self.write_slice_virt(pid, 0x200, &params[null_pos + 1..]);
-                }
-            } else {
-                self.write_slice_virt(pid, 0x100, &params);
-            }
-        }
-
-        self.write_slice_virt(pid, 0, &prog);
-
-
-        let mut cpu = VirtualCPU::new(self._mmu.clone(), self.bus.clone(), pid);
-        cpu.set_pc(0); cpu.set_sp(0xFFFF);
-        vprintln!("PS: Spawn '{}' (PID {}, {} bytes)", program, pid, prog.len());
-
-        // Submit to scheduler, drive via timer (no direct CPU loop)
-        {
-            let mut c = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?;
-            c.insert(pid, cpu);
-        }
-        let mut pcb = crate::services::process::PCB::new(pid, program.clone(), None);
-        pcb.state = ProcessState::Ready;
-        self.process_table.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 61, msg: "table".into() }))?
-            .insert(pid, Arc::new(Mutex::new(pcb)));
-        self.handle_schedule(pid, 1)?;
-
-        for _ in 0..500 {
-            let is_blocked = self.process_table.lock().unwrap().get(&pid).map(|p| p.lock().ok().map(|pcb| pcb.state.is_blocked()).unwrap_or(false)).unwrap_or(false);
-            if let Some(cpu) = self.cpus.lock().unwrap().get(&pid) { if cpu.is_halted() && !is_blocked { break; } } else { break; }
-            let _ = self.handle_timer_interrupt();
-        }
-
-        let mut cpus = self.cpus.lock().unwrap();
-        if let Some(cpu) = cpus.remove(&pid) {
-            vprintln!("PS: PID {} done after {} instructions", pid, cpu.dump_state().instruction_count);
-        }
-        drop(cpus);
-        {
-            let mut scheduler = self.scheduler.lock().unwrap();
-            scheduler.remove(pid, 1);
-        }
-        {
-            let mut table = self.process_table.lock().unwrap();
-            if let Some(pcb_arc) = table.remove(&pid) {
-                if let Ok(mut pcb) = pcb_arc.lock() {
-                    pcb.state = ProcessState::Terminated { exit_code: 0 };
-                }
-            }
-        }
-        self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: 0 })).ok();
-        self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: base })).ok();
-
+        // Respond immediately — processes run via timer, reaper cleans up
         let _ = envelope.respond_success(ResponseData::Void);
         Ok(())
     }
@@ -1597,15 +1404,15 @@ impl ProcessService {
             }
             // ========== Process syscalls (triggered by CPU INT) ==========
             100 => {
-                // Async FORK: block caller, defer work to main loop
-                self.scheduler.lock().unwrap().block(pid, 1);
-                if let Some(p) = self.process_table.lock().unwrap().get(&pid) {
-                    if let Ok(mut pcb) = p.lock() {
-                        pcb.state = ProcessState::Blocked(BlockReason::WaitingForIo { device_id: 0 });
+                // FORK: synchronous clone — child runs from same PC with R0=0
+                match self.fork_impl(pid) {
+                    Ok(child_pid) => {
+                        cpu.write_register(crate::hardware::Register::R0, child_pid);
+                    }
+                    Err(_) => {
+                        cpu.write_register(crate::hardware::Register::R0, 0);
                     }
                 }
-                self.pending_forks.lock().unwrap().push(pid);
-                // Don't call fork_impl here — main loop processes it
             }
             101 => {
                 // EXEC: replace current process with program at 0x100
@@ -1772,7 +1579,9 @@ mod tests {
         let bus = Arc::new(LockedBus::new());
         let mem = crate::hardware::PhysicalMemory::new(1024 * 1024);
         let mmu = Arc::new(crate::hardware::MMU::new(mem.clone(), 4096));
-        ProcessService::new(bus, mem, mmu)
+        let (prx, _) = crossbeam_channel::unbounded();
+        let (irx, _) = crossbeam_channel::unbounded();
+        ProcessService::new(bus, mem, mmu, prx, irx)
     }
 
     #[test]

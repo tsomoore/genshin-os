@@ -194,6 +194,11 @@ impl FileTable {
         self.descriptors.len()
     }
 
+    /// List all open file descriptor numbers
+    pub fn fd_list(&self) -> Vec<Fd> {
+        self.descriptors.keys().cloned().collect()
+    }
+
     /// Check if file descriptor exists
     pub fn contains(&self, fd: Fd) -> bool {
         self.descriptors.contains_key(&fd)
@@ -279,6 +284,35 @@ impl FileDescriptorManager {
         Ok(())
     }
 
+    /// Clone all file descriptors from one process to another (for fork)
+    pub fn clone_fds(&mut self, from_pid: Pid, to_pid: Pid) -> GenshinResult<()> {
+        // Ensure target has a file table
+        self.get_table(to_pid);
+        
+        // Collect FD numbers from source
+        let fd_list: Vec<Fd> = if let Some(table) = self.process_tables.get(&from_pid) {
+            table.fd_list()
+        } else {
+            return Ok(());
+        };
+        
+        // Clone each FD into target with same FD number
+        for fd in &fd_list {
+            if let Some(src) = self.get(from_pid, *fd) {
+                let file = src.file.clone();
+                let flags = src.flags;
+                if let Some(target) = self.process_tables.get_mut(&to_pid) {
+                    let cloned = OpenFile::new(*fd, to_pid, file, flags);
+                    target.descriptors.insert(*fd, Arc::new(cloned));
+                    if target.next_fd <= *fd {
+                        target.next_fd = *fd + 1;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
     /// Get file descriptor count for process
     pub fn count(&self, pid: Pid) -> usize {
         self.process_tables.get(&pid)

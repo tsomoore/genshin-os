@@ -261,6 +261,11 @@ impl FileService {
                 vprintln!("FileService: Close directory fd {}", dir_fd);
             }
 
+            FileRequest::CloneFds { from_pid, to_pid } => {
+                let mut fd_mgr = self.fd_manager.lock().unwrap();
+                fd_mgr.clone_fds(from_pid, to_pid)?;
+            }
+
             _ => {
                 vprintln!("FileService: Unhandled file request");
             }
@@ -348,6 +353,12 @@ impl FileService {
                         });
                     }
                 }
+            }
+
+            FileRequest::CloneFds { from_pid, to_pid } => {
+                let mut fd_mgr = self.fd_manager.lock().unwrap();
+                fd_mgr.clone_fds(from_pid, to_pid)?;
+                let _ = envelope.respond_success(ResponseData::Void);
             }
 
             _ => {

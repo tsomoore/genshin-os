@@ -417,6 +417,10 @@ pub enum FileRequest {
 
     /// Get current file position
     Tell { fd: u32 },
+
+    // ========== Process Integration ==========
+    /// Clone all file descriptors from one process to another (for fork)
+    CloneFds { from_pid: Pid, to_pid: Pid },
 }
 
 /// File system type
