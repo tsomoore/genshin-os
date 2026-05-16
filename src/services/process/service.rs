@@ -578,7 +578,12 @@ impl ProcessService {
                 if !cpu.is_halted() {
                     for _ in 0..3 {
                         if cpu.is_halted() { break; }
-                        if cpu.step().is_err() { if pid != 1 { cpu.halt(); } break; }
+                        if let Err(e) = cpu.step() {
+                            if pid == 1 { break; }
+                            if !matches!(e, crate::error::CPUError::PageFault { .. }) {
+                                cpu.halt(); break;
+                            }
+                        }
                         // Direct syscall handling (no bus round-trip needed)
                         if cpu.syscall_pending {
                             cpu.syscall_pending = false;
