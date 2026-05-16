@@ -76,6 +76,14 @@ impl Shell {
     pub fn run_interactive(&mut self) {
         self.running = true;
 
+        // Spawn demo processes for visual monitoring (fire-and-forget)
+        self.context.send(KernelMsg::Process(crate::messaging::ProcessRequest::Spawn {
+            program: "loop".into(), params: vec![],
+        }));
+        self.context.send(KernelMsg::Process(crate::messaging::ProcessRequest::Spawn {
+            program: "loop".into(), params: vec![],
+        }));
+        
         if self.config.show_welcome {
             self.print_welcome();
         }
