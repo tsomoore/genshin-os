@@ -906,7 +906,7 @@ impl ProcessService {
 
         // Clone page table entries
         for (vaddr, _paddr, flags) in self._mmu.get_page_entries(parent_pid) {
-            let rx = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame{count:1}))
+            let rx = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame{count:1, pid: child_pid}))
                 .map_err(|_| GenshinError::Service(ServiceError::Other{code:90,msg:"alloc".into()}))?;
             let resp = rx.recv_timeout(std::time::Duration::from_millis(200))
                 .map_err(|_| GenshinError::Service(ServiceError::Other{code:91,msg:"timeout".into()}))?;
@@ -1031,7 +1031,7 @@ impl ProcessService {
             self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage{pid,virt:vaddr})).ok();
         }
         // Allocate + map new frames
-        let frames = self.alloc_frames((code.len()+4095)/4096)?;
+        let frames = self.alloc_frames((code.len()+4095)/4096, pid)?;
         for (i, &addr) in frames.iter().enumerate() {
             if let Ok(rx)=self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage{
                 pid, virt:(i*4096)as u64, phys:addr,
@@ -1337,8 +1337,8 @@ impl ProcessService {
         }
     }
 
-    fn alloc_frames(&self, count: usize) -> GenshinResult<Vec<u64>> {
-        let rx = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame { count }))
+    fn alloc_frames(&self, count: usize, pid: Pid) -> GenshinResult<Vec<u64>> {
+        let rx = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame { count, pid }))
             .map_err(|_| GenshinError::Service(ServiceError::Other { code: 90, msg: "AllocFrame failed".into() }))?;
         let resp = rx.recv_timeout(std::time::Duration::from_secs(2))
             .map_err(|_| GenshinError::Service(ServiceError::Other { code: 91, msg: "AllocFrame timeout".into() }))?;

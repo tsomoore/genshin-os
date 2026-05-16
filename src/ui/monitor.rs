@@ -138,7 +138,7 @@ fn render(f: &mut Frame, snap: &Snap) {
         Cell::from("PID").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("STATE").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("NAME").style(Style::default().add_modifier(Modifier::BOLD)),
-        Cell::from("PPID").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("MEM").style(Style::default().add_modifier(Modifier::BOLD)),
     ]);
     let rows: Vec<Row> = snap.processes.iter().filter_map(|s| {
         let parts: Vec<&str> = s.split_whitespace().collect();
@@ -151,15 +151,17 @@ fn render(f: &mut Frame, snap: &Snap) {
             "Zombie" => Style::default().fg(Color::Red),
             _ => Style::default(),
         };
+        let pid_num: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let frames = snap.frame_map.iter().filter(|(_, o)| *o == pid_num).count();
         Some(Row::new(vec![
-            Cell::from((*parts.first().unwrap_or(&"?")).to_string()).style(style),
+            Cell::from(pid_num.to_string()).style(style),
             Cell::from(st.to_string()).style(style),
             Cell::from((*parts.get(2).unwrap_or(&"?")).to_string()).style(style),
-            Cell::from((*parts.get(3).unwrap_or(&"-")).to_string()),
+            Cell::from(format!("{}f", frames)),
         ]))
     }).collect();
 
-    let widths = [Constraint::Length(6), Constraint::Length(10), Constraint::Length(24), Constraint::Length(6)];
+    let widths = [Constraint::Length(6), Constraint::Length(10), Constraint::Length(22), Constraint::Length(8)];
     f.render_widget(
         Table::new(rows, widths).header(header).block(Block::default().title(" Processes ").borders(Borders::ALL).style(Style::default().fg(Color::Green))),
         chunks[1],

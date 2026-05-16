@@ -129,8 +129,8 @@ impl MemoryService {
     fn handle_memory_request(&self, req: MemoryRequest) -> GenshinResult<()> {
         match req {
             // ========== Frame Allocation ==========
-            MemoryRequest::AllocFrame { count } => {
-                self.handle_alloc_frame(count)?;
+            MemoryRequest::AllocFrame { count, pid } => {
+                self.handle_alloc_frame(count, pid)?;
             }
 
             MemoryRequest::FreeFrame { paddr } => {
@@ -172,8 +172,8 @@ impl MemoryService {
     fn handle_memory_request_with_response(&self, req: MemoryRequest, envelope: &Envelope) -> GenshinResult<()> {
         match req {
             // ========== Frame Allocation ==========
-            MemoryRequest::AllocFrame { count } => {
-                self.handle_alloc_frame_with_response(count, envelope)?;
+            MemoryRequest::AllocFrame { count, pid } => {
+                self.handle_alloc_frame_with_response(count, pid, envelope)?;
             }
 
             MemoryRequest::FreeFrame { paddr } => {
@@ -242,11 +242,9 @@ impl MemoryService {
 
     // ========== Frame Allocation Handlers ==========
 
-    fn handle_alloc_frame(&self, count: usize) -> GenshinResult<()> {
+    fn handle_alloc_frame(&self, count: usize, pid: Pid) -> GenshinResult<()> {
         let mut memory = Self::lock_mutex(&self.memory_manager)?;
-
-        // For now, we'll allocate to PID 0 (kernel)
-        let frames = memory.allocate_frames(0, count);
+        let frames = memory.allocate_frames(pid, count);
 
         if frames.len() != count {
             return Err(GenshinError::Service(ServiceError::ResourceExhausted {
@@ -262,11 +260,9 @@ impl MemoryService {
         Ok(())
     }
 
-    fn handle_alloc_frame_with_response(&self, count: usize, envelope: &Envelope) -> GenshinResult<()> {
+    fn handle_alloc_frame_with_response(&self, count: usize, pid: Pid, envelope: &Envelope) -> GenshinResult<()> {
         let mut memory = Self::lock_mutex(&self.memory_manager)?;
-
-        // For now, we'll allocate to PID 0 (kernel)
-        let frames = memory.allocate_frames(0, count);
+        let frames = memory.allocate_frames(pid, count);
 
         if frames.len() != count {
             let _ = envelope.respond_error(MessagingServiceError::ResourceExhausted {

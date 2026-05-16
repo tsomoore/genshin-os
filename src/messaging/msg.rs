@@ -294,7 +294,7 @@ pub enum BlockReason {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MemoryRequest {
     /// Allocate physical memory frame
-    AllocFrame { count: usize },
+    AllocFrame { count: usize, pid: Pid },
 
     /// Free physical memory frame
     FreeFrame { paddr: PhysAddr },
