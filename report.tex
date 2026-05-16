@@ -1,0 +1,237 @@
+% !TeX program = xelatex
+\documentclass[UTF8,a4paper,12pt]{ctexart}
+
+% 页面与基础排版
+\usepackage{geometry}
+\geometry{left=2.8cm,right=2.8cm,top=2.6cm,bottom=2.6cm}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{indentfirst}
+\setlength{\parindent}{2em}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{amssymb}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{hidelinks}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+
+% TikZ 绘图
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, calc}
+
+% 截图占位符
+\newcommand{\screenshot}[2]{%
+  \begin{figure}[H]
+    \centering
+    \fbox{\parbox{0.85\textwidth}{\centering\vspace{3em}\textbf{[ 截图： #1 ]}\vspace{3em}}}
+    \caption{#2}
+  \end{figure}
+}
+
+% 标题层级格式
+\ctexset{
+  section = {
+    format = \zihao{3}\heiti\centering,
+    name = {},
+    number = \chinese{section},
+    aftername = {、},
+    beforeskip = 1.5ex,
+    afterskip = 1.2ex
+  },
+  subsection = {
+    format = \zihao{4}\heiti,
+    name = {},
+    number = \arabic{section}.\arabic{subsection},
+    aftername = {\quad}
+  },
+  subsubsection = {
+    format = \zihao{-4}\heiti,
+    name = {},
+    number = \arabic{section}.\arabic{subsection}.\arabic{subsubsection},
+    aftername = {\quad}
+  }
+}
+
+\begin{document}
+
+% ============================================================
+% 封面
+% ============================================================
+\begin{center}
+    {\zihao{2}\heiti 计算机操作系统课程设计详细设计文档}
+\end{center}
+
+\vspace{2em}
+
+\noindent\textbf{首页写明组长和组员姓名学号，以及每个人的分工}
+
+\vspace{3em}
+
+\noindent\textbf{组长：} \underline{\hspace{10em}} \quad
+\textbf{学号：} \underline{\hspace{10em}}
+
+\vspace{1em}
+
+\noindent\textbf{组员及分工：}
+
+\vspace{0.5em}
+
+\begin{center}
+\begin{tabularx}{0.95\textwidth}{|>{\centering\arraybackslash}p{3cm}|>{\centering\arraybackslash}p{4cm}|X|}
+\hline
+\textbf{姓名} & \textbf{学号} & \multicolumn{1}{c|}{\textbf{分工}} \\
+\hline
+ & & \\
+\hline
+ & & \\
+\hline
+ & & \\
+\hline
+ & & \\
+\hline
+\end{tabularx}
+\end{center}
+
+\newpage
+
+% ============================================================
+% 一、总体设计
+% ============================================================
+\section{总体设计}
+
+\subsection{概述}
+
+\subsubsection{功能描述}
+
+Genshin-OS 是一个基于 Rust 语言开发的微内核操作系统模拟程序。系统严格遵循四层微内核架构，以消息总线（Message Bus）作为所有模块间通信的唯一通道，禁止跨层直接函数调用。用户程序运行在虚拟 CPU 上，通过 \texttt{INT 0x80} 汇编指令触发系统调用，实现进程管理、内存管理、文件 I/O、设备操作等功能。
+
+本系统实现了操作系统课程设计所要求的全部核心功能：
+
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{进程管理}：支持 \texttt{fork() + exec() + wait() + exit()} 的类 Unix 进程生命周期模型。进程状态包括 Creating、Ready、Running、Blocked、Zombie 五种，PID 1 为系统 init 进程。支持信号量同步（sem\_wait / sem\_signal）和互斥锁（lock\_acquire / lock\_release）。
+
+    \item \textbf{处理机调度}：采用双核 SMP Round-Robin 调度算法，时间片为 3 个时钟周期。硬件 Timer 以 100Hz 频率产生中断，通过 \texttt{crossbeam\_channel::select!} 机制驱动 ProcessService 的主事件循环。每个 CPU 独立调度，通过 HashSet 去重保证同一时刻不同 CPU 运行不同进程。
+
+    \item \textbf{内存管理}：基于 4KB 页式存储管理，支持按需调页（Demand Paging）和交换（Swapping）。物理内存通过 FrameAllocator 以帧为单位分配和回收，虚拟地址经 MMU 转换为物理地址。缺页中断由 MemoryService 处理，支持页换入/换出到交换分区。
+
+    \item \textbf{文件系统}：实现虚拟文件系统（VFS），以树形目录结构组织文件。VFS 元数据通过 JSON 持久化，文件内容存储于虚拟磁盘镜像 \texttt{.genshin-disk.img} 中。支持 ls、mkdir、touch、cat、write、rm、stat 等文件操作命令。
+
+    \item \textbf{设备管理}：DeviceService 直接订阅消息总线，提供剪贴板设备。设备的申请、使用、释放通过 \texttt{device\_open} / \texttt{device\_close} 系统调用来完成。
+
+    \item \textbf{中断机制}：实现 Timer 中断（100Hz 时钟中断驱动进程调度）、缺页中断（PageFault，由 MMU 触发）、系统调用陷阱（SyscallTrap，INT 0x80 触发）。中断经 Kernel 路由至对应的服务通道。
+
+    \item \textbf{UI 界面}：提供交互式命令行 Shell（支持 20+ 命令）和全屏 TUI 进程监控面板 \texttt{pmon}（仿 Linux htop，展示进程状态、内存用量、磁盘用量的实时动态变化）。
+\end{enumerate}
+
+\screenshot{启动 Genshin-OS 后执行 ls / dual loop / run busy / pstree 等命令的完整终端截图}{Genshin-OS Shell 交互界面}
+
+\screenshot{执行 dual loop + run busy 后打开 pmon 监控面板的截图}{pmon TUI 进程/内存/磁盘监控面板}
+
+% ── TikZ 系统架构图 ──
+系统的总体架构如图 \ref{fig:arch} 所示，采用四层微内核模型。
+
+\begin{figure}[H]
+    \centering
+    \begin{tikzpicture}[
+        node distance=0.4cm and 0.5cm,
+        box/.style={rectangle, draw, minimum width=2cm, minimum height=0.7cm,
+                    align=center, font=\footnotesize, rounded corners=2pt},
+        lbox/.style={rectangle, draw, rounded corners=4pt, inner sep=0.3cm},
+        arr/.style={-{Stealth[scale=0.7]}, thick},
+        darr/.style={-{Stealth[scale=0.7]}, thick, dashed, gray}
+    ]
+
+    % ═══ Layer 1: Hardware ═══
+    \node[box, fill=red!12] (cpu)    {Virtual\\CPU};
+    \node[box, fill=red!12, right=of cpu] (mmu)    {MMU};
+    \node[box, fill=red!12, right=of mmu] (pmem)  {Physical\\Memory};
+    \node[box, fill=red!12, right=of pmem] (disk)  {Virtual\\Disk};
+    \node[box, fill=red!12, right=of disk, draw=red!70, very thick] (timer) {Timer\,$\bigstar$\\100\,Hz};
+
+    \begin{scope}[on background layer]
+        \node[lbox, fill=red!5, fit=(cpu)(mmu)(pmem)(disk)(timer),
+              label={[font=\bfseries]left:硬件模拟层}] (hw) {};
+    \end{scope}
+
+    % ═══ Layer 2: Services ═══
+    \node[box, fill=green!12, above=1.2cm of hw] (proc) {Process\\Service};
+    \node[box, fill=green!12, right=of proc] (mem)   {Memory\\Service};
+    \node[box, fill=green!12, right=of mem]  (file)  {File\\Service};
+    \node[box, fill=green!12, right=of file] (dev)   {Device\\Service};
+
+    \begin{scope}[on background layer]
+        \node[lbox, fill=green!5, fit=(proc)(mem)(file)(dev),
+              label={[font=\bfseries]left:服务层}] (svc) {};
+    \end{scope}
+
+    % ═══ Layer 3: Kernel ═══
+    \node[box, fill=orange!12, minimum width=10.5cm, above=1.2cm of svc] (bus) {
+        Kernel --- LockedBus (消息总线中枢)\\
+        \footnotesize process\_tx \textbar{} memory\_tx \textbar{} file\_tx \textbar{} intr\_tx
+    };
+
+    \begin{scope}[on background layer]
+        \node[lbox, fill=orange!5, fit=(bus),
+              label={[font=\bfseries]left:交换层}] (krn) {};
+    \end{scope}
+
+    % ═══ Layer 4: UI ═══
+    \node[box, fill=cyan!12, above=1.2cm of krn] (shell) {Shell\\命令行};
+    \node[box, fill=cyan!12, right=1cm of shell] (pmon)  {pmon\\TUI 监控};
+
+    \begin{scope}[on background layer]
+        \node[lbox, fill=cyan!5, fit=(shell)(pmon),
+              label={[font=\bfseries]left:用户交互层}] (ui) {};
+    \end{scope}
+
+    % ═══ Arrows ═══
+    \draw[arr] (shell.south) -- ++(0,-0.25) -| (bus.north);
+    \draw[arr] (pmon.south)  -- ++(0,-0.25) -| (bus.north);
+    \draw[arr] (bus.south) ++(-2.4,0) -- (proc.north);
+    \draw[arr] (bus.south) ++(-0.8,0) -- (mem.north);
+    \draw[arr] (bus.south) ++(0.8,0)  -- (file.north);
+    \draw[arr] (bus.south) ++(2.4,0)  -- (dev.north);
+
+    \draw[darr] (proc.south) -- (cpu.north);
+    \draw[darr] (proc.south) -- (mmu.north);
+    \draw[darr] (mem.south)  -- (pmem.north);
+    \draw[darr] (mem.south)  -- (mmu.north);
+    \draw[darr] (file.south) -- (disk.north);
+
+    \draw[arr, red, bend right=35] (timer.north) to
+        node[midway, right, font=\footnotesize\color{red}] {Timer 中断} (bus.east);
+
+    \end{tikzpicture}
+    \caption{系统总体架构图——四层微内核模型}
+    \label{fig:arch}
+\end{figure}
+
+\subsubsection{运行环境}
+
+\begin{itemize}
+    \item 操作系统：Linux（Ubuntu / Debian / Arch），亦支持 Windows 和 macOS（需 Rust 工具链）
+    \item 运行时依赖：无（编译为单二进制可执行文件 \texttt{chao-os}）
+    \item 终端要求：支持 ANSI 转义序列和 Raw Mode 的终端模拟器（pmon TUI 所需）
+\end{itemize}
+
+\subsubsection{开发环境}
+
+\begin{itemize}
+    \item 编程语言：Rust（edition 2024）
+    \item 编译器：rustc 1.94.0+
+    \item 构建工具：Cargo
+    \item 版本控制：Git
+    \item 主要依赖：
+    \begin{itemize}
+        \item \texttt{crossbeam-channel 0.5} — 消息总线通道
+        \item \texttt{ratatui 0.29 + crossterm 0.28} — TUI 终端渲染（pmon）
+        \item \texttt{serde + serde\_json} — VFS 元数据持久化
+        \item \texttt{thiserror 2.0} — 错误类型派生
+    \end{itemize}
+\end{itemize}
+
+\end{document}
