@@ -1,7 +1,7 @@
 ; rwlock.asm — Semaphore mutual exclusion (with real loop!)
 ; Uses CMP+JNZ for a proper counted loop
 MOV R1, #0      ; global sem ID
-MOV R3, #10     ; loop counter: 10 iterations
+MOV R3, #100    ; loop counter: 100 iterations (visible in pmon)
 
 ; === loop ===
 MOV R0, #201    ; sem_wait(R1=0)
