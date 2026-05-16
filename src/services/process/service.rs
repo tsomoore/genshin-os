@@ -1387,11 +1387,11 @@ impl ProcessService {
 
                 vprintln!("PS: PID {} exited with code {}", pid, exit_code);
             },
-            1 => println!("[PRINT] {}", r1 as i64),
+            1 => vprintln!("[PRINT] {}", r1 as i64),
             2 => {
                 let data = self.read_bytes_virt(pid, r1, r2 as usize);
                 let s = String::from_utf8_lossy(&data);
-                println!("{}", s);
+                vprintln!("{}", s);
             },
             10 => {
                 let flags = if r1 == 0 { OpenFlags::read_only() } else { OpenFlags::create() };
