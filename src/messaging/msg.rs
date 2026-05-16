@@ -323,6 +323,9 @@ pub enum MemoryRequest {
     /// Swap in page from disk
     SwapIn { pid: Pid, virt: VirtAddr },
 
+    /// Get per-frame ownership map for memory visualization
+    GetFrameMap,
+
     /// Get memory stats for TUI monitor
     GetStats,
 }

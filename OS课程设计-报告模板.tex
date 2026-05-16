@@ -1,0 +1,213 @@
+% !TeX program = xelatex
+\documentclass[UTF8,a4paper,12pt]{ctexart}
+
+% 页面与基础排版
+\usepackage{geometry}
+\geometry{left=2.8cm,right=2.8cm,top=2.6cm,bottom=2.6cm}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{indentfirst}
+\setlength{\parindent}{2em}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{amssymb}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{hidelinks}
+
+% 标题层级格式
+\ctexset{
+  section = {
+    format = \zihao{3}\heiti\centering,
+    name = {},
+    number = \chinese{section},
+    aftername = {、},
+    beforeskip = 1.5ex,
+    afterskip = 1.2ex
+  },
+  subsection = {
+    format = \zihao{4}\heiti,
+    name = {},
+    number = \arabic{section}.\arabic{subsection},
+    aftername = {\quad}
+  },
+  subsubsection = {
+    format = \zihao{-4}\heiti,
+    name = {},
+    number = \arabic{section}.\arabic{subsection}.\arabic{subsubsection},
+    aftername = {\quad}
+  }
+}
+
+\newcommand{\placeholder}[1]{\textbf{#1}}
+\newcommand{\blankline}{\par\vspace{1.2em}}
+
+\begin{document}
+
+\begin{center}
+    {\zihao{2}\heiti 计算机操作系统课程设计详细设计文档}
+\end{center}
+
+\vspace{2em}
+
+\noindent\textbf{首页写明组长和组员姓名学号，以及每个人的分工}
+
+\vspace{3em}
+
+\noindent\textbf{组长：} \underline{\hspace{10em}} \quad
+\textbf{学号：} \underline{\hspace{10em}}
+
+\vspace{1em}
+
+\noindent\textbf{组员及分工：}
+
+\vspace{0.5em}
+
+\begin{center}
+\begin{tabularx}{0.95\textwidth}{|>{\centering\arraybackslash}p{3cm}|>{\centering\arraybackslash}p{4cm}|X|}
+\hline
+\textbf{姓名} & \textbf{学号} & \multicolumn{1}{c|}{\textbf{分工}} \\
+\hline
+ & & \\
+\hline
+ & & \\
+\hline
+ & & \\
+\hline
+ & & \\
+\hline
+\end{tabularx}
+\end{center}
+
+\newpage
+
+\section{总体设计}
+
+\subsection{概述}
+
+\subsubsection{功能描述}
+\blankline
+
+\subsubsection{运行环境}
+\blankline
+
+\subsubsection{开发环境}
+\blankline
+
+\subsection{设计思想}
+
+\subsubsection{软件设计构思}
+\blankline
+
+\subsubsection{关键技术与算法}
+\blankline
+
+\subsubsection{基本数据结构}
+\blankline
+
+\subsection{基本处理流程}
+\blankline
+
+\subsection{软件的体系结构设计}
+
+\subsubsection{软件体系结构框图}
+\blankline
+
+\subsubsection{软件主要模块及其依赖关系说明}
+\blankline
+
+\subsection{软件数据结构设计}
+
+\subsubsection{全局数据结构说明}
+\blankline
+
+\subsubsection{数据结构与系统单元的关系}
+
+说明各个数据结构与访问这些数据结构的各个模块级产品组件的分配之间的对应关系，可采用如下的矩阵图的形式：
+
+\begin{center}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{0.95\textwidth}{|>{\centering\arraybackslash}p{3cm}|>{\centering\arraybackslash}X|>{\centering\arraybackslash}X|>{\centering\arraybackslash}X|>{\centering\arraybackslash}X|}
+\hline
+ & \textbf{模块1} & \textbf{模块2} & \textbf{……} & \textbf{模块m} \\
+\hline
+数据结构1 & $\checkmark$ & & & \\
+\hline
+数据结构2 & & $\checkmark$ & & \\
+\hline
+…… & & & & \\
+\hline
+数据结构n & & $\checkmark$ & & $\checkmark$ \\
+\hline
+\end{tabularx}
+\end{center}
+
+\subsection{软件接口设计}
+
+\begin{enumerate}[label=(\arabic*)]
+    \item 操作界面（命令接口）
+
+    用户使用这个界面组织工作流程和控制程序的运行。
+
+    \item 系统功能服务界面（程序接口）
+
+    用户程序在其运行过程中，使用系统调用功能来请求操作系统的服务。
+\end{enumerate}
+
+\subsubsection{外部接口}
+
+键盘，输入数据保存文件。
+
+屏幕显示，显示程序图形界面关系。
+
+\subsubsection{内部接口}
+
+输入文件名称和文件内容，点击保存文件，并显示文件存储路径及文件名称，文件内容。
+
+\section{用户界面设计}
+
+\subsection{界面的关系图}
+\blankline
+
+\subsection{界面说明}
+
+\subsubsection{界面1}
+\blankline
+
+\section{相关处理流程}
+
+本章逐个地给出各个层次中的每个程序单元的设计考虑。
+
+\subsection{程序单元1设计说明}
+
+\subsubsection{程序单元说明}
+\blankline
+
+\subsubsection{数据结构说明}
+\blankline
+
+\subsubsection{算法及流程}
+\blankline
+
+\subsubsection{数据存储说明}
+
+具体说明需要以文件方式保存的数据文件名、数据存储格式、数据项及属性等。
+
+\subsubsection{源程序文件说明}
+\blankline
+
+\subsubsection{函数说明}
+\blankline
+
+\subsection{程序单元2设计说明}
+
+用类似3.1的方式，说明第2个程序单元乃至第n个程序单元的设计考虑。
+
+\section{总结}
+\blankline
+
+\section{附录}
+\blankline
+
+\end{document}

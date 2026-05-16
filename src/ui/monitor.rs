@@ -1,4 +1,5 @@
 // htop-style TUI Process Monitor for Genshin-OS
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,12 +9,26 @@ use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table};
 use ratatui::{Frame, Terminal};
 
 use crate::hardware::Timer;
 use crate::messaging::{FileRequest, KernelMsg, MemoryRequest, MessageBus, ProcessRequest, ResponseData};
 use crate::ui::UIContext;
+
+fn pid_color(n: u64) -> Color {
+    match n % 8 {
+        0 => Color::Green,
+        1 => Color::Cyan,
+        2 => Color::Magenta,
+        3 => Color::Blue,
+        4 => Color::Red,
+        5 => Color::Yellow,
+        6 => Color::LightRed,
+        _ => Color::White,
+    }
+}
 
 #[derive(Default, Clone)]
 struct Snap {
@@ -22,6 +37,7 @@ struct Snap {
     total_frames: u64,
     used_frames: u64,
     free_frames: u64,
+    frame_map: Vec<(u64, u64)>,
     disk_total: u64,
     disk_used: u64,
     ticks: u64,
@@ -83,6 +99,11 @@ fn collect_snapshot(ctx: &UIContext, timer: &Arc<Timer>, snap: &mut Snap) {
             snap.free_frames = *free_frames;
         }
     }
+    if let Some(resp) = query(ctx, KernelMsg::Memory(MemoryRequest::GetFrameMap)) {
+        if let Some(ResponseData::FrameMap(map)) = resp.data() {
+            snap.frame_map = map.clone();
+        }
+    }
     if let Some(resp) = query(ctx, KernelMsg::File(FileRequest::DiskInfo)) {
         if let Some(ResponseData::DiskStats { total_sectors, used_sectors, total_bytes: _ }) = resp.data() {
             snap.disk_total = *total_sectors as u64;
@@ -99,8 +120,8 @@ fn render(f: &mut Frame, snap: &Snap) {
         .margin(1)
         .constraints([
             Constraint::Length(2),
-            Constraint::Min(6),
-            Constraint::Length(7),
+            Constraint::Min(5),
+            Constraint::Length(9),
             Constraint::Length(1),
         ])
         .split(f.area());
@@ -148,7 +169,12 @@ fn render(f: &mut Frame, snap: &Snap) {
     let md = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(50), Constraint::Percentage(50)]).split(chunks[2]);
     // Memory
     let mem_block = Block::default().title(" Memory ").borders(Borders::ALL).style(Style::default().fg(Color::Yellow));
-    let mem_in = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(3)]).split(mem_block.inner(md[0]));
+    let mem_inner = mem_block.inner(md[0]);
+    let mem_in = Layout::default().direction(Direction::Vertical).constraints([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(5),
+    ]).split(mem_inner);
     f.render_widget(mem_block, md[0]);
     if snap.total_frames > 0 {
         let r = (snap.used_frames as f64 / snap.total_frames as f64).min(1.0);
@@ -157,8 +183,45 @@ fn render(f: &mut Frame, snap: &Snap) {
                 .label(format!("{:.1}%  used={}KB  free={}KB  total={}KB", r*100.0, snap.used_frames*4, snap.free_frames*4, snap.total_frames*4)),
             mem_in[0],
         );
-        f.render_widget(Paragraph::new(format!("  Frames: {} used / {} free / {} total  |  Page: 4KB  |  Physical: {}MB", snap.used_frames, snap.free_frames, snap.total_frames, snap.total_frames*4/1024)), mem_in[1]);
+
+        if !snap.frame_map.is_empty() {
+            let w = (mem_inner.width as usize).saturating_sub(2).max(40);
+            let step = (snap.frame_map.len() / w).max(1);
+            let mut spans: Vec<Span> = vec![Span::raw(" ")];
+            let mut i = 0;
+            while i < snap.frame_map.len() {
+                let end = (i + step).min(snap.frame_map.len());
+                let slice = &snap.frame_map[i..end];
+                let owned_count = slice.iter().filter(|(_, o)| *o > 0).count();
+                let ratio = owned_count as f64 / slice.len() as f64;
+                let color = if ratio > 0.7 {
+                    let first_owner = slice.iter().find(|(_, o)| *o > 0).map(|(_, o)| *o).unwrap_or(0);
+                    pid_color(first_owner)
+                } else {
+                    Color::DarkGray
+                };
+                spans.push(Span::styled("\u{2588}", Style::default().fg(color)));
+                i = end;
+            }
+            f.render_widget(Paragraph::new(Line::from(spans)), mem_in[1]);
+        }
+
+        // Per-PID frame summary
+        let mut pid_frames: BTreeMap<u64, usize> = BTreeMap::new();
+        for (_, owner) in &snap.frame_map {
+            if *owner > 0 { *pid_frames.entry(*owner).or_default() += 1; }
+        }
+        let mut lines = vec![format!("  Frames: {} used / {} free / {} total", snap.used_frames, snap.free_frames, snap.total_frames)];
+        for (pid, count) in &pid_frames {
+            let block = "\u{2588}".repeat((*count as f64 / snap.total_frames as f64 * 20.0).ceil() as usize);
+            lines.push(format!("  PID {:>3}: {:>4} frames ({:>5} KB) {}", pid, count, count * 4, block));
+        }
+        if pid_frames.is_empty() {
+            lines.push("  (no frames allocated to any process)".into());
+        }
+        f.render_widget(Paragraph::new(lines.join("\n")), mem_in[2]);
     }
+
     // Disk
     let disk_block = Block::default().title(" Disk ").borders(Borders::ALL).style(Style::default().fg(Color::Blue));
     let disk_in = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Length(3)]).split(disk_block.inner(md[1]));

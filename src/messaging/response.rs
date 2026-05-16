@@ -63,6 +63,9 @@ pub enum ResponseData {
         free_frames: u64,
     },
 
+    /// Frame ownership map for memory visualization
+    FrameMap(Vec<(u64, u64)>),
+
     /// String value
     String(String),
 
@@ -93,6 +96,7 @@ impl fmt::Display for ResponseData {
             Self::MemoryStats { total_frames, used_frames, free_frames } => {
                 write!(f, "Mem({}/{}/{})", used_frames, free_frames, total_frames)
             }
+            Self::FrameMap(map) => write!(f, "FrameMap({})", map.len()),
         }
     }
 }

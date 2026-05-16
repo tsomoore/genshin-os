@@ -161,6 +161,8 @@ impl MemoryService {
             }
 
             MemoryRequest::GetStats => {} // via response
+
+            MemoryRequest::GetFrameMap => {} // via response
         }
 
         Ok(())
@@ -212,6 +214,13 @@ impl MemoryService {
                     used_frames: used,
                     free_frames: free,
                 });
+            }
+
+            MemoryRequest::GetFrameMap => {
+                let mm = self.memory_manager.lock().unwrap();
+                let alloc = mm.allocator();
+                let owners = alloc.frame_owners();
+                let _ = envelope.respond_success(ResponseData::FrameMap(owners));
             }
         }
 

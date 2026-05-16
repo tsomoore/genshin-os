@@ -210,6 +210,13 @@ impl FrameAllocator {
         }
         freed
     }
+
+    /// Get ownership map: (frame_number, owner_pid_or_0_if_free) for all frames
+    pub fn frame_owners(&self) -> Vec<(u64, u64)> {
+        self.frames.iter()
+            .map(|f| (f.number, f.owner.unwrap_or(0)))
+            .collect()
+    }
 }
 
 /// Memory usage statistics
