@@ -1,5 +1,4 @@
 // htop-style TUI Process Monitor for Genshin-OS
-use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +37,7 @@ struct Snap {
     used_frames: u64,
     free_frames: u64,
     frame_map: Vec<(u64, u64)>,
+    mem_ranges: Vec<String>,
     disk_total: u64,
     disk_used: u64,
     ticks: u64,
@@ -102,6 +102,11 @@ fn collect_snapshot(ctx: &UIContext, timer: &Arc<Timer>, snap: &mut Snap) {
     if let Some(resp) = query(ctx, KernelMsg::Memory(MemoryRequest::GetFrameMap)) {
         if let Some(ResponseData::FrameMap(map)) = resp.data() {
             snap.frame_map = map.clone();
+        }
+    }
+    if let Some(resp) = query(ctx, KernelMsg::Process(ProcessRequest::GetMemoryMap)) {
+        if let Some(ResponseData::StringList(ranges)) = resp.data() {
+            snap.mem_ranges = ranges.clone();
         }
     }
     if let Some(resp) = query(ctx, KernelMsg::File(FileRequest::DiskInfo)) {
@@ -208,18 +213,14 @@ fn render(f: &mut Frame, snap: &Snap) {
             f.render_widget(Paragraph::new(Line::from(spans)), mem_in[1]);
         }
 
-        // Per-PID frame summary
-        let mut pid_frames: BTreeMap<u64, usize> = BTreeMap::new();
-        for (_, owner) in &snap.frame_map {
-            if *owner > 0 { *pid_frames.entry(*owner).or_default() += 1; }
-        }
+        // Per-process memory address ranges
         let mut lines = vec![format!("  Frames: {} used / {} free / {} total", snap.used_frames, snap.free_frames, snap.total_frames)];
-        for (pid, count) in &pid_frames {
-            let block = "\u{2588}".repeat((*count as f64 / snap.total_frames as f64 * 20.0).ceil() as usize);
-            lines.push(format!("  PID {:>3}: {:>4} frames ({:>5} KB) {}", pid, count, count * 4, block));
-        }
-        if pid_frames.is_empty() {
-            lines.push("  (no frames allocated to any process)".into());
+        if snap.mem_ranges.is_empty() {
+            lines.push("  (no frames allocated)".into());
+        } else {
+            for r in &snap.mem_ranges {
+                lines.push(format!("  {}", r));
+            }
         }
         f.render_widget(Paragraph::new(lines.join("\n")), mem_in[2]);
     }

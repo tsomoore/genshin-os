@@ -291,6 +291,8 @@ impl ProcessService {
             }
 
             ProcessRequest::GetStats => {} // handled via response path
+
+            ProcessRequest::GetMemoryMap => {} // handled via response path
         }
 
         Ok(())
@@ -339,6 +341,28 @@ impl ProcessService {
                             lines.push(format!("{:>4} {:>12} {:<20} {:>4}", pid, state, pcb.name, ppid_str));
                         }
                     }
+                }
+                let _ = envelope.respond_success(ResponseData::StringList(lines));
+            }
+
+            ProcessRequest::GetMemoryMap => {
+                // Return per-process virtual address ranges
+                let table = Self::lock_mutex(&self.process_table)?;
+                let mut pids: Vec<Pid> = table.keys().cloned().collect();
+                pids.sort();
+                let mut lines: Vec<String> = Vec::new();
+                for pid in pids {
+                    let mut entries = self._mmu.get_page_entries(pid);
+                    if entries.is_empty() { continue; }
+                    entries.sort_by_key(|(v, _, _)| *v);
+                    let mut ranges: Vec<String> = Vec::new();
+                    for (vaddr, _, _) in &entries {
+                        let start = vaddr;
+                        let end = vaddr + 0xFFF;
+                        ranges.push(format!("0x{:04X}-0x{:04X}", start, end));
+                    }
+                    let total_kb = entries.len() * 4;
+                    lines.push(format!("PID {:>3}: {} ({:>4} KB)", pid, ranges.join(", "), total_kb));
                 }
                 let _ = envelope.respond_success(ResponseData::StringList(lines));
             }

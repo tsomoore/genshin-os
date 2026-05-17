@@ -278,6 +278,9 @@ pub enum ProcessRequest {
 
     /// Get system stats for TUI monitor
     GetStats,
+
+    /// Get per-process virtual address ranges (start-end) for memory map display
+    GetMemoryMap,
 }
 
 /// Reason for a thread being blocked
