@@ -348,7 +348,7 @@ impl Shell {
                 let prog = command.args.get(0).map(|s| s.as_str()).unwrap_or("busy");
                 let pname = if prog == "busy" { "dual".into() } else { format!("dual:{}", prog) };
                 let msg = KernelMsg::Process(ProcessRequest::Spawn { program: pname, params: vec![] });
-                self.context.send(msg);  // fire-and-forget: processes run via timer
+                self.send_and_wait(msg)?;  // wait for spawn to complete
                 Ok(())
             }
             "fork" => {
