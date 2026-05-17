@@ -76,13 +76,13 @@ impl Shell {
     pub fn run_interactive(&mut self) {
         self.running = true;
 
-        // Spawn demo processes for visual monitoring (fire-and-forget)
-        self.context.send(KernelMsg::Process(crate::messaging::ProcessRequest::Spawn {
-            program: "loop".into(), params: vec![],
-        }));
-        self.context.send(KernelMsg::Process(crate::messaging::ProcessRequest::Spawn {
-            program: "loop".into(), params: vec![],
-        }));
+        // Spawn demo processes via fork+exec (no wait — background)
+        if let Ok(pid) = self.fork_exec_detach("loop", &[]) {
+            println!("Started loop (PID {})", pid);
+        }
+        if let Ok(pid) = self.fork_exec_detach("loop", &[]) {
+            println!("Started loop (PID {})", pid);
+        }
         
         if self.config.show_welcome {
             self.print_welcome();
@@ -131,9 +131,8 @@ impl Shell {
         }
     }
 
-    /// Send a request via the message bus and wait for the response
-    /// fork + exec + wait helper: the Unix way
-    fn fork_exec_wait(&self, prog: &str, args: &[&str]) -> Result<(), String> {
+    /// fork + exec: start a background process (no wait)
+    fn fork_exec_detach(&self, prog: &str, args: &[&str]) -> Result<u64, String> {
         let fork_msg = KernelMsg::Process(ProcessRequest::ForkProcess { parent_pid: 1 });
         let child_pid = match self.send_and_wait(fork_msg) {
             Ok(r) => if let Some(ResponseData::Pid(p)) = r.data() { *p } else { return Err("fork failed".into()); },
@@ -144,6 +143,12 @@ impl Shell {
             pid: child_pid, executable: prog.into(), args: a, path: None,
         });
         self.send_and_wait(exec_msg)?;
+        Ok(child_pid)
+    }
+
+    /// fork + exec + wait: the Unix way (foreground)
+    fn fork_exec_wait(&self, prog: &str, args: &[&str]) -> Result<(), String> {
+        let child_pid = self.fork_exec_detach(prog, args)?;
         let wait_msg = KernelMsg::Process(ProcessRequest::WaitChild { pid: 1, child_pid: Some(child_pid) });
         self.send_and_wait(wait_msg)?;
         Ok(())
@@ -346,9 +351,9 @@ impl Shell {
             }
             "dual" => {
                 let prog = command.args.get(0).map(|s| s.as_str()).unwrap_or("busy");
-                let pname = if prog == "busy" { "dual".into() } else { format!("dual:{}", prog) };
-                let msg = KernelMsg::Process(ProcessRequest::Spawn { program: pname, params: vec![] });
-                self.send_and_wait(msg)?;  // wait for spawn to complete
+                let pid1 = self.fork_exec_detach(prog, &[])?;
+                let pid2 = self.fork_exec_detach(prog, &[])?;
+                println!("dual: {} PID {} + PID {}", prog, pid1, pid2);
                 Ok(())
             }
             "fork" => {
@@ -472,11 +477,9 @@ impl Shell {
             "run" => {
                 let prog = command.args.get(0).ok_or_else(|| "run: missing program name")?;
                 let args: Vec<String> = command.args.iter().skip(1).cloned().collect();
-                let msg = KernelMsg::Process(ProcessRequest::Spawn {
-                    program: prog.clone(), params: vec![],
-                });
-                self.context.send(msg);  // fire-and-forget: processes run via timer
-                println!("run: started '{}'", prog);
+                let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                let pid = self.fork_exec_detach(prog, &args_ref)?;
+                println!("run: {} (PID {})", prog, pid);
                 Ok(())
             }
             "minigdb" => {
