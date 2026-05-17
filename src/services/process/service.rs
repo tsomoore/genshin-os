@@ -86,7 +86,7 @@ impl ProcessService {
             next_pid: Arc::new(Mutex::new(1)),
             ipc_manager: Arc::new(Mutex::new(IPCManager::new())),
             sync_manager: Arc::new(Mutex::new(SyncManager::new())),
-            scheduler: Arc::new(Mutex::new(Scheduler::round_robin(3))),
+            scheduler: Arc::new(Mutex::new(Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 2))),
             parent_children: Arc::new(Mutex::new(HashMap::new())),
             _hw: hw, _mmu: mmu,
             cpus: Arc::new(Mutex::new(HashMap::new())),
@@ -530,12 +530,12 @@ impl ProcessService {
         let mut scheduled_this_tick = std::collections::HashSet::new();
         for cpu_id in 0..self.cpu_count {
             let mut scheduler = Self::lock_mutex(&self.scheduler)?;
-            let mut decision = scheduler.schedule();
+            let mut decision = scheduler.schedule(cpu_id);
             // Dedup: if PID already assigned to another CPU, try next from queue
             if let SchedulingDecision::Run { pid, .. } = &decision {
                 if scheduled_this_tick.contains(pid) {
                     // Re-queue to back, then pick next from queue
-                    decision = scheduler.yield_current();
+                    decision = scheduler.yield_current(cpu_id);
                     if let SchedulingDecision::Run { pid: pid2, .. } = &decision {
                         scheduled_this_tick.insert(*pid2);
                     }
