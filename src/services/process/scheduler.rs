@@ -141,28 +141,29 @@ impl Scheduler {
         self.dequeue_next(cpu_id)
     }
 
-    /// Dequeue next process from ready queue for CPU
+    /// Dequeue next, skipping PIDs already running on other CPUs
     fn dequeue_next(&mut self, cpu_id: usize) -> SchedulingDecision {
-        let entry = match self.policy {
-            SchedulingPolicy::FIFO | SchedulingPolicy::RoundRobin { .. } | SchedulingPolicy::MLFQ => {
-                self.ready_queue.pop_front()
-            }
-            SchedulingPolicy::Priority | SchedulingPolicy::SJF => {
-                if self.priority_queue.is_empty() { None }
-                else { Some(self.priority_queue.remove(0)) }
-            }
-        };
+        let busy: Vec<Pid> = self.cpu_current.iter()
+            .enumerate().filter(|&(i,_)| i != cpu_id)
+            .filter_map(|(_,c)| c.map(|(p,_)| p)).collect();
 
-        if let Some(e) = entry {
-            self.cpu_current[cpu_id] = Some((e.pid, e.tid));
-            self.cpu_ticks[cpu_id] = 0;
-            self.total_scheduled += 1;
-            self.context_switches += 1;
-            SchedulingDecision::Run { pid: e.pid, tid: e.tid }
-        } else {
-            self.cpu_current[cpu_id] = None;
-            SchedulingDecision::Idle
+        let n = self.ready_queue.len();
+        for _ in 0..n {
+            let entry = self.ready_queue.pop_front();
+            if let Some(e) = entry {
+                if busy.contains(&e.pid) {
+                    self.ready_queue.push_back(e);
+                    continue;
+                }
+                self.cpu_current[cpu_id] = Some((e.pid, e.tid));
+                self.cpu_ticks[cpu_id] = 0;
+                self.total_scheduled += 1;
+                self.context_switches += 1;
+                return SchedulingDecision::Run { pid: e.pid, tid: e.tid };
+            }
         }
+        self.cpu_current[cpu_id] = None;
+        SchedulingDecision::Idle
     }
 
     /// Re-queue current process on this CPU and pick next (for SMP dedup)
