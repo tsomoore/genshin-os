@@ -652,10 +652,15 @@ impl ProcessService {
                         }
                     }
                     let s = cpu.dump_state();
-                    vprintln!("CPU{}[{}]: PC={:#06x} R0={} R1={} R2={} R3={} | IC={} {}",
-                        cpu_id, pid, s.pc, s.registers[0] as i64, s.registers[1] as i64,
-                        s.registers[2] as i64, s.registers[3] as i64,
-                        s.instruction_count, if cpu.is_halted() { "[HALTED]" } else { "" });
+                    let pname = self.process_table.lock().unwrap()
+                        .get(&pid).and_then(|p| p.lock().ok())
+                        .map(|pcb| pcb.name.clone()).unwrap_or_default();
+                    if pname != "loop" {
+                        vprintln!("CPU{}[{}]: PC={:#06x} R0={} R1={} R2={} R3={} | IC={} {}",
+                            cpu_id, pid, s.pc, s.registers[0] as i64, s.registers[1] as i64,
+                            s.registers[2] as i64, s.registers[3] as i64,
+                            s.instruction_count, if cpu.is_halted() { "[HALTED]" } else { "" });
+                    }
                 }
             }
 
