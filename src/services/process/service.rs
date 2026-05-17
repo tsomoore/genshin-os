@@ -626,7 +626,7 @@ impl ProcessService {
                             if cpu.is_halted() { break; }
                         }
                         // Handle bus-based interrupts (pagefault etc)
-                        for _ in 0..200 {
+                        for _ in 0..5 {
                             while let Ok(env) = self.intr_rx.try_recv() {
                                 if let KernelMsg::Interrupt(int) = &env.message {
                                     match int {
