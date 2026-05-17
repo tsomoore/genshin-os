@@ -346,4 +346,33 @@ mod tests {
         s.schedule(0); s.schedule(0); // tick 2,3 of PID 1
         assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 2, tid: 1 });
     }
+
+    #[test]
+    fn test_block_removes_from_cpu_and_ready_queue() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 2);
+        s.ready(1, 1, 128); s.ready(2, 1, 128); s.ready(3, 1, 128);
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 1, tid: 1 });
+        assert_eq!(s.schedule(1), SchedulingDecision::Run { pid: 2, tid: 1 });
+        assert!(s.block(1, 1));
+        assert_eq!(s.current_on(0), None);
+        assert_eq!(s.ready_count(), 1);
+    }
+
+    #[test]
+    fn test_blocked_not_returned_on_expiry() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 1);
+        s.ready(1, 1, 128); s.ready(2, 1, 128);
+        let _ = s.schedule(0); s.block(1, 1);
+        s.schedule(0); s.schedule(0);
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 2, tid: 1 });
+    }
+
+    #[test]
+    fn test_unblock_readds_to_queue() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 1);
+        s.ready(1, 1, 128); s.ready(2, 1, 128);
+        let _ = s.schedule(0); s.block(1, 1);
+        s.ready(1, 1, 128);
+        assert_eq!(s.ready_count(), 2);
+    }
 }
