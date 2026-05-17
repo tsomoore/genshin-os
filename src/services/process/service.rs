@@ -534,9 +534,8 @@ impl ProcessService {
             // Dedup: if PID already assigned to another CPU, try next from queue
             if let SchedulingDecision::Run { pid, .. } = &decision {
                 if scheduled_this_tick.contains(pid) {
-                    scheduler.ready(*pid, 1, 128);
-                    scheduler.remove(*pid, 1);
-                    decision = scheduler.schedule();
+                    // Re-queue to back, then pick next from queue
+                    decision = scheduler.yield_current();
                     if let SchedulingDecision::Run { pid: pid2, .. } = &decision {
                         scheduled_this_tick.insert(*pid2);
                     }

@@ -187,6 +187,15 @@ impl Scheduler {
         false
     }
 
+    /// Yield current process: re-queue and pick next (for SMP dedup)
+    pub fn yield_current(&mut self) -> SchedulingDecision {
+        if let Some((pid, tid)) = self.current {
+            self.ready(pid, tid, 128);
+            self.current = None;
+            self.time_used = 0;
+        }
+        self.get_next()
+    }
     /// Get the next scheduling decision
     pub fn schedule(&mut self) -> SchedulingDecision {
         match self.policy {
