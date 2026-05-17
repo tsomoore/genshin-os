@@ -343,7 +343,6 @@ impl ProcessService {
             ProcessRequest::GetStats => {
                 // Collect process table for TUI monitor
                 let table = Self::lock_mutex(&self.process_table)?;
-                let parent_children = Self::lock_mutex(&self.parent_children)?;
                 let mut lines: Vec<String> = Vec::new();
                 let mut pids: Vec<Pid> = table.keys().cloned().collect();
                 pids.sort();
@@ -355,10 +354,6 @@ impl ProcessService {
                                 .replace("Zombie { exit_code: ", "Zombie(")
                                 .replace(" }", ")")
                                 .replace("Blocked(", "Blocked");
-                            let ppid = parent_children.iter()
-                                .find(|(p, _)| **p == pid)
-                                .map(|(_, _)| "-")
-                                .unwrap_or("-");
                             let ppid_str = pcb.parent_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
                             lines.push(format!("{:>4} {:>12} {:<20} {:>4}", pid, state, pcb.name, ppid_str));
                         }
