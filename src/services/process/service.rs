@@ -1460,6 +1460,8 @@ impl ProcessService {
                             if let Some(ResponseData::Bytes(data)) = resp.data() {
                                 if data.is_empty() { break; }
                                 print!("{}", String::from_utf8_lossy(&data));
+                                use std::io::Write;
+                                let _ = std::io::stdout().flush();
                                 offset += data.len() as u64;
                                 if data.len() < chunk { break; }
                             } else { break; }
