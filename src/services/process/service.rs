@@ -1676,7 +1676,7 @@ mod tests {
 
         // Check scheduler state
         let scheduler = service.scheduler.lock().unwrap();
-        assert!(scheduler.has_ready());
+        assert!(scheduler.ready_count() > 0);
     }
 
     #[test]

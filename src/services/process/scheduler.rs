@@ -219,4 +219,131 @@ mod tests {
         // Tick 3: quantum expired, switch to PID 2
         assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 2, tid: 1 });
     }
+
+    #[test]
+    fn test_smp_dedup_prevented_by_yield() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 2);
+        s.ready(1, 1, 128);
+        s.ready(2, 1, 128);
+
+        // CPU0 takes PID 1
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 1, tid: 1 });
+        // CPU1 would get PID 1 too (quantum not expired), but dedup should yield
+        // Caller must use yield_current(1) if pid==1 is already assigned
+        let d1 = s.yield_current(1);
+        assert_eq!(d1, SchedulingDecision::Run { pid: 2, tid: 1 });
+    }
+
+    #[test]
+    fn test_empty_queue_returns_idle() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 2);
+        assert_eq!(s.schedule(0), SchedulingDecision::Idle);
+        assert_eq!(s.schedule(1), SchedulingDecision::Idle);
+    }
+
+    #[test]
+    fn test_remove_from_cpu_and_queue() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 2);
+        s.ready(1, 1, 128);
+        s.ready(2, 1, 128);
+
+        // CPU0 picks PID 1
+        let _ = s.schedule(0);
+        // Remove PID 1
+        assert!(s.remove(1, 1));
+        // CPU0 should not have PID 1 anymore
+        assert_eq!(s.current_on(0), None);
+        // CPU0 picks next
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 2, tid: 1 });
+    }
+
+    #[test]
+    fn test_block_is_alias_for_remove() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 1);
+        s.ready(1, 1, 128);
+        let _ = s.schedule(0);
+        assert!(s.block(1, 1));
+        assert_eq!(s.ready_count(), 0);
+    }
+
+    #[test]
+    fn test_round_robin_three_processes() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 2 }, 1);
+        s.ready(1, 1, 128);
+        s.ready(2, 1, 128);
+        s.ready(3, 1, 128);
+
+        // Q1: PID 1
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 1, tid: 1 });
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 1, tid: 1 });
+        // Q1 expired → PID 2
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 2, tid: 1 });
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 2, tid: 1 });
+        // Q2 expired → PID 3
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 3, tid: 1 });
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 3, tid: 1 });
+        // Q3 expired → PID 1 again (round-robin)
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 1, tid: 1 });
+    }
+
+    #[test]
+    fn test_smp_two_cpus_full_round() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 2);
+        s.ready(1, 1, 128);
+        s.ready(2, 1, 128);
+        s.ready(3, 1, 128);
+
+        // Tick 1: CPU0=PID1, CPU1=PID2
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 1, tid: 1 });
+        assert_eq!(s.schedule(1), SchedulingDecision::Run { pid: 2, tid: 1 });
+
+        // Tick 2: keep same (quantum not expired)
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 1, tid: 1 });
+        assert_eq!(s.schedule(1), SchedulingDecision::Run { pid: 2, tid: 1 });
+
+        // Tick 3: keep same (last before expiry)
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 1, tid: 1 });
+        assert_eq!(s.schedule(1), SchedulingDecision::Run { pid: 2, tid: 1 });
+
+        // Tick 4: quantum expired → CPU0=PID3, CPU1=PID1 (re-queued)
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 3, tid: 1 });
+        assert_eq!(s.schedule(1), SchedulingDecision::Run { pid: 1, tid: 1 });
+    }
+
+    #[test]
+    fn test_yield_current_requeues_and_picks_next() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 1);
+        s.ready(1, 1, 128);
+        s.ready(2, 1, 128);
+        s.ready(3, 1, 128);
+
+        // Pick PID 1
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 1, tid: 1 });
+        // Yield: PID 1 back to queue, pick next
+        let d = s.yield_current(0);
+        assert_eq!(d, SchedulingDecision::Run { pid: 2, tid: 1 });
+        // PID 1 should be back in queue
+        assert_eq!(s.ready_count(), 2); // PID 1 + PID 3
+    }
+
+    #[test]
+    fn test_remove_nonexistent_returns_false() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 1);
+        assert!(!s.remove(99, 1));
+    }
+
+    #[test]
+    fn test_new_process_joins_back_of_queue() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 1);
+        s.ready(1, 1, 128);
+        s.ready(2, 1, 128);
+        let _ = s.schedule(0); // gets PID 1
+
+        // Add PID 3 while PID 1 is running
+        s.ready(3, 1, 128);
+
+        // Quantum expires → PID 2 (was in queue before PID 3)
+        s.schedule(0); s.schedule(0); // tick 2,3 of PID 1
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 2, tid: 1 });
+    }
 }
