@@ -526,10 +526,24 @@ impl ProcessService {
     // Scheduler quantum: 3 timer ticks per time slice (= ~9 instructions)
 
     fn handle_timer_interrupt(&self) -> GenshinResult<()> {
-        // SMP: schedule and run one process per vCPU each tick
+        // SMP: schedule one unique process per vCPU each tick
+        let mut scheduled_this_tick = std::collections::HashSet::new();
         for cpu_id in 0..self.cpu_count {
             let mut scheduler = Self::lock_mutex(&self.scheduler)?;
-            let decision = scheduler.schedule();
+            let mut decision = scheduler.schedule();
+            // Dedup: if PID already assigned to another CPU, try next from queue
+            if let SchedulingDecision::Run { pid, .. } = &decision {
+                if scheduled_this_tick.contains(pid) {
+                    scheduler.ready(*pid, 1, 128);
+                    scheduler.remove(*pid, 1);
+                    decision = scheduler.schedule();
+                    if let SchedulingDecision::Run { pid: pid2, .. } = &decision {
+                        scheduled_this_tick.insert(*pid2);
+                    }
+                } else {
+                    scheduled_this_tick.insert(*pid);
+                }
+            }
             drop(scheduler);
 
         // State machine: transition previous Running→Ready on preemption
@@ -591,7 +605,7 @@ impl ProcessService {
                             if cpu.is_halted() { break; }
                         }
                         // Handle bus-based interrupts (pagefault etc)
-                        for _ in 0..20 {
+                        for _ in 0..200 {
                             while let Ok(env) = self.intr_rx.try_recv() {
                                 if let KernelMsg::Interrupt(int) = &env.message {
                                     match int {
