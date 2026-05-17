@@ -1522,24 +1522,39 @@ impl ProcessService {
                     } else { false }
                 };
                 if blocked {
-                    // Block process until signaled
                     if let Some(p) = self.process_table.lock().unwrap().get(&pid) {
                         if let Ok(mut pcb) = p.lock() {
                             pcb.state = ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr: sem_id });
                         }
                     }
                     self.scheduler.lock().unwrap().block(pid, 1);
+                    cpu.halt();
                 }
             }
             202 => {
-                // SEM_SIGNAL(sem_id): unblock waiters
                 let sem_id = r1;
-                let mut sync = self.sync_manager.lock().unwrap();
-                if let Some(sem) = sync.get_semaphore(sem_id) {
-                    sem.signal();
+                {
+                    let mut sync = self.sync_manager.lock().unwrap();
+                    if let Some(sem) = sync.get_semaphore(sem_id) { sem.signal(); }
                 }
-                // Unblock the first waiter (simplified: just make all Blocked ready)
-                // In real impl, would track which process is waiting on which sem
+                let to_unblock: Vec<Pid> = {
+                    let table = self.process_table.lock().unwrap();
+                    table.iter().filter_map(|(&p, pcb)| {
+                        if let Ok(pcb) = pcb.lock() {
+                            if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
+                                if *lock_addr == sem_id { return Some(p); }
+                            }
+                        }
+                        None
+                    }).collect()
+                };
+                for wpid in to_unblock {
+                    if let Some(p) = self.process_table.lock().unwrap().get(&wpid) {
+                        if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
+                    }
+                    self.scheduler.lock().unwrap().ready(wpid, 1, 128);
+                    if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) { c.halted = false; }
+                }
             }
             203 => {
                 // LOCK_CREATE: returns lock_id in R1
@@ -1563,14 +1578,32 @@ impl ProcessService {
                         }
                     }
                     self.scheduler.lock().unwrap().block(pid, 1);
+                    cpu.halt();
                 }
             }
             205 => {
-                // LOCK_RELEASE(lock_id): unlock, unblock waiters
                 let lock_id = r1;
-                let mut sync = self.sync_manager.lock().unwrap();
-                if let Some(mutex) = sync.get_mutex(lock_id) {
-                    mutex.release(pid);
+                {
+                    let mut sync = self.sync_manager.lock().unwrap();
+                    if let Some(mutex) = sync.get_mutex(lock_id) { mutex.release(pid); }
+                }
+                let to_unblock: Vec<Pid> = {
+                    let table = self.process_table.lock().unwrap();
+                    table.iter().filter_map(|(&p, pcb)| {
+                        if let Ok(pcb) = pcb.lock() {
+                            if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
+                                if *lock_addr == lock_id { return Some(p); }
+                            }
+                        }
+                        None
+                    }).collect()
+                };
+                for wpid in to_unblock {
+                    if let Some(p) = self.process_table.lock().unwrap().get(&wpid) {
+                        if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
+                    }
+                    self.scheduler.lock().unwrap().ready(wpid, 1, 128);
+                    if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) { c.halted = false; }
                 }
             }
             // ── Device syscalls ──
