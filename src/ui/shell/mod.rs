@@ -306,8 +306,9 @@ impl Shell {
                     path: target.clone(),
                 });
                 match self.send_and_wait(msg) {
-                    Ok(_) => { self.cwd = target; Ok(()) }
-                    Err(_) => Err(format!("cd: {}: No such directory", path)),
+                    Ok(resp) if resp.is_success() => { self.cwd = target; Ok(()) }
+                    Ok(_) => Err(format!("cd: {}: Not a directory", path)),
+                    Err(_) => Err(format!("cd: {}: No such file or directory", path)),
                 }
             }
             "ls" => {
