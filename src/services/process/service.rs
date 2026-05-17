@@ -1533,27 +1533,30 @@ impl ProcessService {
             }
             202 => {
                 let sem_id = r1;
-                {
-                    let mut sync = self.sync_manager.lock().unwrap();
-                    if let Some(sem) = sync.get_semaphore(sem_id) { sem.signal(); }
-                }
-                let to_unblock: Vec<Pid> = {
+                // Find blocked waiter BEFORE signaling
+                let waiter: Option<Pid> = {
                     let table = self.process_table.lock().unwrap();
-                    table.iter().filter_map(|(&p, pcb)| {
+                    table.iter().find_map(|(&p, pcb)| {
                         if let Ok(pcb) = pcb.lock() {
                             if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
                                 if *lock_addr == sem_id { return Some(p); }
                             }
                         }
                         None
-                    }).collect()
+                    })
                 };
-                for wpid in to_unblock {
+                if let Some(wpid) = waiter {
+                    // Transfer ownership: unblock waiter directly (skip sem.signal increment)
                     if let Some(p) = self.process_table.lock().unwrap().get(&wpid) {
                         if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
                     }
                     self.scheduler.lock().unwrap().ready(wpid, 1, 128);
                     if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) { c.halted = false; }
+                    vprintln!("PS: sem_signal {} transferred to PID {}", sem_id, wpid);
+                } else {
+                    // No waiter: increment count so next sem_wait can acquire
+                    let mut sync = self.sync_manager.lock().unwrap();
+                    if let Some(sem) = sync.get_semaphore(sem_id) { sem.signal(); }
                 }
             }
             203 => {
@@ -1583,27 +1586,26 @@ impl ProcessService {
             }
             205 => {
                 let lock_id = r1;
-                {
-                    let mut sync = self.sync_manager.lock().unwrap();
-                    if let Some(mutex) = sync.get_mutex(lock_id) { mutex.release(pid); }
-                }
-                let to_unblock: Vec<Pid> = {
+                let waiter: Option<Pid> = {
                     let table = self.process_table.lock().unwrap();
-                    table.iter().filter_map(|(&p, pcb)| {
+                    table.iter().find_map(|(&p, pcb)| {
                         if let Ok(pcb) = pcb.lock() {
                             if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
                                 if *lock_addr == lock_id { return Some(p); }
                             }
                         }
                         None
-                    }).collect()
+                    })
                 };
-                for wpid in to_unblock {
+                if let Some(wpid) = waiter {
                     if let Some(p) = self.process_table.lock().unwrap().get(&wpid) {
                         if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
                     }
                     self.scheduler.lock().unwrap().ready(wpid, 1, 128);
                     if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) { c.halted = false; }
+                } else {
+                    let mut sync = self.sync_manager.lock().unwrap();
+                    if let Some(mutex) = sync.get_mutex(lock_id) { mutex.release(pid); }
                 }
             }
             // ── Device syscalls ──
