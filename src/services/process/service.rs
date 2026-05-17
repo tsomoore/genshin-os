@@ -281,9 +281,33 @@ impl ProcessService {
             ProcessRequest::Spawn { program, .. } => {
                 let pname = if program == "dual" { "busy" } else if program.starts_with("dual:") { &program[5..] } else { &program };
                 let count = if program.starts_with("dual") { 2 } else { 1 };
+                let mut shared_frame: Option<u64> = None;
+                if pname == "rwlock2" {
+                    let mut sync = self.sync_manager.lock().unwrap();
+                    sync.create_semaphore(0, 1);
+                    sync.create_semaphore(0, 1);
+                    drop(sync);
+                    if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame { count: 1, pid: 0 })) {
+                        if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                            if let Some(crate::messaging::ResponseData::PhysicalAddr(addr)) = resp.data() {
+                                shared_frame = Some(*addr);
+                            }
+                        }
+                    }
+                }
+                let mut child_pids: Vec<Pid> = Vec::new();
                 for _ in 0..count {
                     if let Ok(child) = self.fork_impl(0) {
                         let _ = self.exec_impl(child, pname.to_string(), vec![]);
+                        child_pids.push(child);
+                    }
+                }
+                if let Some(frame_addr) = shared_frame {
+                    for &pid in &child_pids {
+                        if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
+                            pid, virt: 0x10000, phys: frame_addr,
+                            prot: crate::messaging::MemProt { readable: true, writable: true, executable: false },
+                        })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(1)); }
                     }
                 }
             }
@@ -1345,11 +1369,35 @@ impl ProcessService {
     fn handle_spawn(&self, program: String, params: Vec<u8>, envelope: &Envelope) -> GenshinResult<()> {
         let pname = if program == "dual" { "busy" } else if program.starts_with("dual:") { &program[5..] } else { &program };
         let count = if program.starts_with("dual") { 2 } else { 1 };
+        // rwlock2: allocate shared frame + extra semaphores
+        let mut shared_frame: Option<u64> = None;
+        if pname == "rwlock2" {
+            let mut sync = self.sync_manager.lock().unwrap();
+            sync.create_semaphore(0, 1); // sem 1: mutex
+            sync.create_semaphore(0, 1); // sem 2: wrt
+            drop(sync);
+            if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::AllocFrame { count: 1, pid: 0 })) {
+                if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                    if let Some(crate::messaging::ResponseData::PhysicalAddr(addr)) = resp.data() {
+                        shared_frame = Some(*addr);
+                    }
+                }
+            }
+        }
+        let mut child_pids: Vec<Pid> = Vec::new();
         for _ in 0..count {
             let child = self.fork_impl(0)?;
             self.exec_impl(child, pname.to_string(), vec![])?;
+            child_pids.push(child);
         }
-        // Respond immediately — processes run via timer, reaper cleans up
+        if let Some(frame_addr) = shared_frame {
+            for &pid in &child_pids {
+                if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(crate::messaging::MemoryRequest::MapPage {
+                    pid, virt: 0x10000, phys: frame_addr,
+                    prot: crate::messaging::MemProt { readable: true, writable: true, executable: false },
+                })) { let _ = rx.recv_timeout(std::time::Duration::from_secs(1)); }
+            }
+        }
         let _ = envelope.respond_success(ResponseData::Void);
         Ok(())
     }
