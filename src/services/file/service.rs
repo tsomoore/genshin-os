@@ -115,7 +115,14 @@ impl FileService {
             let vfs_path = format!("{}/{}", vfs_dir, fname);
             let mut vfs = match self.vfs.lock() { Ok(v) => v, Err(_) => return, };
             let node = match vfs.lookup_path(&vfs_path) {
-                Ok(n) => n,
+                Ok(n) => {
+                    // File exists — skip if already has disk blocks
+                    let existing_blocks = n.lock().unwrap().blocks.clone();
+                    if !existing_blocks.is_empty() {
+                        continue; // Already imported, don't re-write to disk
+                    }
+                    n
+                }
                 Err(_) => {
                     // File doesn't exist in VFS yet — create it
                     let parent_path = vfs_dir.to_string();
