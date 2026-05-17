@@ -108,20 +108,22 @@ impl ProcessService {
         }
 
         loop {
-            // Block on BOTH channels: Timer interrupts drive scheduling,
-            // process messages handled on arrival. No polling, no sleep.
             crossbeam_channel::select! {
                 recv(self.intr_rx) -> env => {
-                    // Timer interrupt → heartbeat: drive scheduler
                     if let Ok(env) = env {
                         if matches!(&env.message, KernelMsg::Interrupt(_)) {
                             self.handle_timer_interrupt().ok();
                         }
                     }
+                    // Anti-starvation: also check receiver after timer tick
+                    if let Ok(env) = self.receiver.try_recv() {
+                        if let Err(e) = self.handle_envelope(env) {
+                            eprintln!("ProcessService error: {}", e);
+                        }
+                    }
                 }
 
                 recv(self.receiver) -> env => {
-                    // Process message from Kernel → handle immediately
                     match env {
                         Ok(envelope) => {
                             if let Err(e) = self.handle_envelope(envelope) {

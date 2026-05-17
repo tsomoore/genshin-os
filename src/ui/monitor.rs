@@ -82,7 +82,7 @@ fn run_loop(
 fn query(ctx: &UIContext, msg: KernelMsg) -> Option<crate::messaging::Response> {
     ctx.send_request(msg)
         .ok()
-        .and_then(|rx| rx.recv_timeout(Duration::from_millis(100)).ok())
+        .and_then(|rx| rx.recv_timeout(Duration::from_millis(500)).ok())
 }
 
 fn collect_snapshot(ctx: &UIContext, timer: &Arc<Timer>, snap: &mut Snap) {
