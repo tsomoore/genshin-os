@@ -65,8 +65,8 @@ pub struct ProcessService {
     pending_forks: Arc<Mutex<Vec<Pid>>>,
     /// Parents waiting on children: (child_pid, (parent_pid, response_channel))
     waiting_parents: Arc<Mutex<Vec<(Pid, (Pid, crossbeam_channel::Sender<Response>))>>>,
-    /// Last scheduled PID: track for Running→Ready transition on preemption
-    last_running: Arc<Mutex<Option<Pid>>>,
+    /// Last scheduled PID per CPU: track for Running→Ready on preemption
+    last_running: Arc<Mutex<Vec<Option<Pid>>>>,
     cpu_count: usize,
 }
 
@@ -93,7 +93,7 @@ impl ProcessService {
             pending_forks: Arc::new(Mutex::new(Vec::new())),
             waiting_parents: Arc::new(Mutex::new(Vec::new())),
             cpu_count: 2,
-            last_running: Arc::new(Mutex::new(None)),
+            last_running: Arc::new(Mutex::new(vec![None, None])),
         }
     }
 
@@ -549,9 +549,10 @@ impl ProcessService {
         {
             let mut last = self.last_running.lock().unwrap();
             if let SchedulingDecision::Run { pid, .. } = &decision {
-                if last.map_or(true, |l| l != *pid) {
-                    if let Some(prev) = *last {
-                        if let Some(pcb) = self.process_table.lock().unwrap().get(&prev) {
+                let prev = last[cpu_id];
+                if prev != Some(*pid) {
+                    if let Some(prev_pid) = prev {
+                        if let Some(pcb) = self.process_table.lock().unwrap().get(&prev_pid) {
                             if let Ok(mut p) = pcb.lock() {
                                 if p.state == ProcessState::Running {
                                     p.state = ProcessState::Ready;
@@ -559,11 +560,10 @@ impl ProcessService {
                             }
                         }
                     }
-                    *last = Some(*pid);
+                    last[cpu_id] = Some(*pid);
                 }
             } else {
-                // Idle: clear last running
-                if let Some(prev) = *last {
+                if let Some(prev) = last[cpu_id] {
                     if let Some(pcb) = self.process_table.lock().unwrap().get(&prev) {
                         if let Ok(mut p) = pcb.lock() {
                             if p.state == ProcessState::Running {
@@ -572,7 +572,7 @@ impl ProcessService {
                         }
                     }
                 }
-                *last = None;
+                last[cpu_id] = None;
             }
         }
 
