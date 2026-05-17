@@ -18,16 +18,16 @@ fn main() {
     let bus = Arc::new(LockedBus::new());
     println!("\u{2713} Hardware + Message bus");
 
-    // Start hardware timer (drives process scheduler)
-    let timer = Arc::new(Timer::new(bus.clone(), TimerConfig { tick_interval_ms: 10, auto_start: true }));
-    println!("\u{2713} Timer (hardware, 100 Hz)");
-
-    // Kernel owns the bus subscription, creates service channels
+    // Kernel MUST subscribe to bus before Timer starts sending
     let (kernel, prx, irx, mrx, frx) = Kernel::new(bus.clone());
     let kernel_handle = thread::spawn(move || {
         kernel.run();
     });
     println!("\u{2713} Kernel");
+
+    // Start hardware timer AFTER Kernel has subscribed
+    let timer = Arc::new(Timer::new(bus.clone(), TimerConfig { tick_interval_ms: 10, auto_start: true }));
+    println!("\u{2713} Timer (hardware, 100 Hz)");
 
     // ProcessService — receives from kernel channel
     let process_bus = bus.clone();
