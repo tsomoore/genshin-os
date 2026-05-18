@@ -644,7 +644,14 @@ impl ProcessService {
                         // Direct syscall handling (no bus round-trip needed)
                         if cpu.syscall_pending {
                             cpu.syscall_pending = false;
-                            self.handle_file_syscall(cpu, cpu.syscall_regs[0], cpu.syscall_regs[1], cpu.syscall_regs[2]);
+                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                self.handle_file_syscall(cpu, cpu.syscall_regs[0], cpu.syscall_regs[1], cpu.syscall_regs[2]);
+                            }));
+                            if r.is_err() {
+                                eprintln!("PS: syscall panic for pid={}", pid);
+                                cpu.halt();
+                                break;
+                            }
                             if cpu.is_halted() { break; }
                         }
                         // Handle bus-based interrupts (pagefault etc)
