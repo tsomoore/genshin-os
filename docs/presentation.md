@@ -805,3 +805,201 @@ pub fn new() -> Self {
 | Zombie 检查 (unhalt Ready) | `src/services/process/service.rs` | 699-710 |
 | syncdemo.asm | `programs/syncdemo.asm` | 全文 |
 | syncdemo 文档 | `docs/syncdemo.md` | 全文 |
+
+
+## 十、系统调用：INT 0x80 全表
+
+### 10.1 系统调用机制
+
+CPU 执行 `INT 0x80` 指令时：
+1. 设置 `syscall_pending = true`，保存寄存器快照 `syscall_regs`
+2. 返回 `Ok(())`，继续执行后续指令
+3. 量子循环检测 `syscall_pending` → 调用 `handle_file_syscall(cpu, r0, r1, r2)`
+4. 根据 R0 值分发到对应处理器
+
+```rust
+// src/hardware/cpu.rs:659-666 (INT 指令执行)
+Instruction::Int { .. } => {
+    self.syscall_pending = true;
+    self.syscall_regs = [self.registers[0], ..];
+    Ok(())
+}
+
+// src/services/process/service.rs:644-647 (量子循环中处理)
+if cpu.syscall_pending {
+    cpu.syscall_pending = false;
+    self.handle_file_syscall(cpu, cpu.syscall_regs[0], ...);
+}
+```
+
+### 10.2 系统调用全表
+
+| R0 | 名称 | 参数 | 说明 | 代码行 |
+|----|------|------|------|--------|
+| 0 | exit | R1=exit_code | 退出进程 | 1443-1487 |
+| 1 | print_int | R1=value | 打印整数 | 1488 |
+| 2 | print_str | R1=addr, R2=len | 打印字符串 | 1489-1493 |
+| 10 | open | R1=flags | 打开/创建文件 | 1489-1498 |
+| 11 | close | R1=fd | 关闭文件 | 1499 |
+| 12 | read | R1=fd, R2=size | 循环读文件 | 1500-1520 |
+| 13 | write | R1=fd, R2=size | 写文件(从0x200) | 1521-1523 |
+| 14 | mkdir | - | 创建目录(路径在0x100) | 1525 |
+| 16 | unlink | - | 删除文件(路径在0x100) | 1526 |
+| 17 | stat | - | 文件信息 | 1527 |
+| 18 | listdir | - | 列目录 | 1528-1534 |
+| 100 | fork | - | 克隆进程(异步) | 1549-1560 |
+| 101 | exec | - | 替换程序(程序名在0x100) | 1561-1565 |
+| 200 | sem_create | - | 创建信号量 | 1567-1572 |
+| 201 | sem_wait | R1=sem_id | P 操作 | 1573-1579 |
+| 202 | sem_signal | R1=sem_id | V 操作 | 1580-1619 |
+| 208-211 | device | - | 剪贴板设备 | 1670-1704 |
+
+**文件**：所有处理器在 `src/services/process/service.rs:1442-1704`（`handle_file_syscall`）。
+
+### 10.3 汇编层面的系统调用
+
+syncdemo.asm 示例——三个系统调用协作：
+
+```asm
+MOV R1, #0      ; 参数: sem_id=0
+MOV R0, #201    ; 系统调用号: sem_wait
+INT 0x80        ; 触发 → ProcessService.handle_file_syscall(cpu, 201, 0, 0)
+
+MOV R0, #1      ; 系统调用号: print_int
+MOV R1, #0x5B   ; 参数: '['
+INT 0x80        ; 触发 → 打印 '['
+
+MOV R0, #202    ; 系统调用号: sem_signal
+INT 0x80        ; 触发 → 释放信号量
+```
+
+**关键**：每条 `INT 0x80` 是一条完整的系统调用。ProcessService 的 `handle_file_syscall` 根据 R0 值用 `match` 分发到具体处理器。
+
+### 10.4 代码位置
+
+| 组件 | 文件 | 行号 |
+|------|------|------|
+| INT 指令执行 | `src/hardware/cpu.rs` | 659-666 |
+| 量子循环 syscall 处理 | `src/services/process/service.rs` | 644-647 |
+| handle_file_syscall (全表) | `src/services/process/service.rs` | 1442-1704 |
+
+
+## 十一、文件系统：VFS + 持久化
+
+### 11.1 VFS 树形结构
+
+```rust
+// src/services/file/vfs.rs:24-40
+pub struct VFSNode {
+    inode: u64,                        // 唯一编号
+    name: String,                      // 文件名
+    node_type: File | Directory | SymLink,
+    parent: Option<u64>,               // 父目录 inode
+    children: HashMap<String, u64>,    // name → child_inode
+    blocks: Vec<u64>,                  // 磁盘扇区列表
+    size: u64,                         // 文件大小
+    permissions: u16,
+}
+```
+
+目录树示例：
+
+```
+/ (inode 0)
+├── bin/    home/    tmp/    etc/
+└── programs/ (inode 7)
+    ├── ls.asm (inode 8)   blocks=[4]
+    ├── cat.asm (inode 9)  blocks=[5]
+    └── syncdemo.asm       blocks=[...]
+```
+
+### 11.2 双重持久化
+
+```
+VFS 元数据 (JSON)             文件内容 (VirtualDisk)
+.genshin-vfs.json             .genshin-disk.img
+{                              Sector 0: 分配位图
+  "root_inode": 0,             Sector 1-3: 目录元数据
+  "nodes": [                   Sector 4: ls.asm 内容
+    {inode:8, name:"ls.asm",   Sector 5: cat.asm 内容
+     blocks:[4], size:109}     ...
+  ]                           }
+}
+```
+
+**代码**：
+- 保存：`src/services/file/vfs.rs:389-404`（`save_to_file`）
+- 加载：`src/services/file/vfs.rs:406-430`（`load_from_file`）
+- 磁盘写入：`src/services/file/file.rs:260-285`（`sync_to_disk`）
+
+### 11.3 文件操作全流程（以 write 为例）
+
+```
+Shell: write /docs/hello.txt HelloWorld
+  │
+  ├─ fork(1) → child PID N
+  ├─ exec(N, "write", ["/docs/hello.txt", "HelloWorld"])
+  │   └─ 路径写入 0x100，内容写入 0x200
+  └─ wait(1, N)
+       │
+       └─ CPU 执行 write.asm:
+            MOV R1,#1; MOV R0,#10; INT 0x80    ← open(create)
+            MOV R0,#13; MOV R2,#255; INT 0x80  ← write(data at 0x200)
+            MOV R0,#11; INT 0x80               ← close
+
+INT 0x80 → handle_file_syscall:
+  R0=10 → FileRequest::Open → FileService → VFS.create_file → 分配 inode
+  R0=13 → FileRequest::WriteData → FileService → file.write → sync_to_disk
+       → 分配磁盘扇区 → 写入 .genshin-disk.img → vfs_node.blocks 记录扇区号
+  R0=11 → FileRequest::Close → 关闭 fd
+  
+HALT → Zombie → reaper 回收
+```
+
+### 11.4 磁盘扇区管理
+
+```rust
+// src/hardware/disk.rs:16-25
+pub struct VirtualDisk {
+    file: File,                  // .genshin-disk.img 文件
+    total_sectors: u32,         // 总扇区数 (默认 2048)
+    bitmap: Vec<u64>,           // 分配位图 (bit=1 表示已用)
+}
+```
+
+- **分配**：`allocate_sectors(n)` → 扫描 bitmap 找连续空闲位 → 返回起始扇区号
+- **释放**：`free_sectors(start, n)` → 清除 bitmap 对应位
+- **读写**：`write_sector(s, buf)` / `read_sector(s)` → 基于文件的 seek+read/write
+
+每个扇区 512 字节。一个 .asm 文件通常占 1 个扇区。
+
+### 11.5 命令与系统调用映射
+
+| Shell 命令 | fork+exec 的程序 | 使用的系统调用 (R0) |
+|-----------|-----------------|-------------------|
+| ls | ls.asm | 18 (listdir) |
+| mkdir | mkdir.asm | 14 (mkdir) |
+| touch | touch.asm | 10 (open create) + 11 (close) |
+| cat | cat.asm | 10 (open) + 12 (read) + 11 (close) |
+| write | write.asm | 10 (open) + 13 (write) + 11 (close) |
+| rm | rm.asm | 16 (unlink) |
+| stat | stat.asm | 17 (stat) |
+
+所有命令都是 `fork(1) → exec(child, prog, args) → wait(1, child)` 的标准流程。
+
+### 11.6 代码位置
+
+| 组件 | 文件 | 行号 |
+|------|------|------|
+| VFSNode 结构体 | `src/services/file/vfs.rs` | 24-40 |
+| VirtualFileSystem | `src/services/file/vfs.rs` | 173-220 |
+| create_file | `src/services/file/vfs.rs` | 223-260 |
+| lookup_path | `src/services/file/vfs.rs` | 290-330 |
+| save_to_file / load_from_file | `src/services/file/vfs.rs` | 389-430 |
+| FileService open | `src/services/file/service.rs` | 481-550 |
+| FileService read | `src/services/file/service.rs` | 664-686 |
+| FileService write | `src/services/file/service.rs` | 721-760 |
+| VirtualDisk | `src/hardware/disk.rs` | 16-40 |
+| allocate_sectors | `src/hardware/disk.rs` | 252-280 |
+| write_sector | `src/hardware/disk.rs` | 110-122 |
+| write.asm 示例 | `programs/write.asm` | 全文 |
