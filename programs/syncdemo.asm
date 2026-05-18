@@ -26,4 +26,6 @@ SUB R3, #1      ; 0x88: loop
 CMP R3, #0      ; 0x90
 JNZ 0x08        ; 0x98
 
-HALT            ; 0xA0
+MOV R0, #0      ; 0xA0: exit(0) — releases semaphore
+MOV R1, #0      ; 0xA8
+INT 0x80        ; 0xB0

@@ -709,6 +709,10 @@ impl ProcessService {
                     if let Ok(mut p) = pcb.lock() {
                         if !p.state.is_terminated() {
                             p.state = ProcessState::Zombie { exit_code: 0 };
+                            // Release sem 0: HALT-without-exit shouldn't deadlock waiters
+                            if let Ok(mut sync) = self.sync_manager.lock() {
+                                if let Some(sem) = sync.get_semaphore(0) { sem.signal(); }
+                            }
                             vprintln!("PS: PID {} → Zombie", pid);
                             // Notify waiting parent
                             let mut wp = self.waiting_parents.lock().unwrap();
