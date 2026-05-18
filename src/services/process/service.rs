@@ -86,7 +86,7 @@ impl ProcessService {
             next_pid: Arc::new(Mutex::new(1)),
             ipc_manager: Arc::new(Mutex::new(IPCManager::new())),
             sync_manager: Arc::new(Mutex::new(SyncManager::new())),
-            scheduler: Arc::new(Mutex::new(Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 10 }, 2))),
+            scheduler: Arc::new(Mutex::new(Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 2))),
             parent_children: Arc::new(Mutex::new(HashMap::new())),
             _hw: hw, _mmu: mmu,
             cpus: Arc::new(Mutex::new(HashMap::new())),
