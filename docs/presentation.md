@@ -1003,3 +1003,143 @@ pub struct VirtualDisk {
 | allocate_sectors | `src/hardware/disk.rs` | 252-280 |
 | write_sector | `src/hardware/disk.rs` | 110-122 |
 | write.asm 示例 | `programs/write.asm` | 全文 |
+
+### 11.7 增删改查（CRUD）详解
+
+#### CREATE — 创建文件
+
+```
+Shell: touch /docs/hello.txt
+  → fork_exec_wait("touch", &["/docs/hello.txt"])
+
+touch.asm 执行:
+  MOV R1, #1      ; flags = create
+  MOV R0, #10     ; open(path, create)
+  INT 0x80        → FileService.handle_open_with_response
+                      ├─ vfs.lookup_path → 不存在, flags.create=true
+                      ├─ 解析父路径 "/docs" → parent_inode
+                      ├─ vfs.create_file(parent, "hello.txt", pid)
+                      │   ├─ 分配新 inode
+                      │   ├─ parent.children["hello.txt"] = new_inode
+                      │   └─ vfs_node { type:File, size:0, blocks:[] }
+                      ├─ 分配 fd → fd_manager.allocate(pid, file)
+                      └─ respond_success(Fd(fd))
+  MOV R0, #11     ; close(fd)
+  INT 0x80        → FileService.handle_close
+  HALT
+
+结果: /docs/hello.txt 出现在 VFS 树中, size=0, blocks=[]
+```
+
+**代码**：`src/services/file/service.rs:481-550` (handle_open_with_response)，`src/services/file/vfs.rs:223-260` (create_file)
+
+#### READ — 读取文件
+
+```
+Shell: cat /docs/hello.txt
+  → fork_exec_wait("cat", &["/docs/hello.txt"])
+
+cat.asm 执行:
+  MOV R0, #10     ; open(path, read_only)
+  INT 0x80        → fd in R1
+  MOV R0, #12     ; read(fd, max=16)
+  MOV R2, #0x10
+  INT 0x80        → handle_file_syscall(R0=12):
+                      loop {
+                        FileRequest::Read { fd, offset, size:16 }
+                        → FileService.handle_read_with_response
+                           ├─ fd_manager.get(pid, fd) → OpenFile
+                           ├─ open_file.read(16) → File.read()
+                           │   └─ 若 dirty: sync_to_disk(先写回)
+                           │   └─ 若未加载: load_from_disk(从磁盘读取扇区)
+                           └─ respond_success(Bytes(data))
+                        print!("{}", data)  // 打印到终端
+                        offset += data.len()
+                        if data.len() < 16 { break }
+                      }
+  MOV R0, #11     ; close(fd)
+  INT 0x80
+  HALT
+```
+
+**代码**：`src/services/process/service.rs:1500-1520` (R0=12 处理器)，`src/services/file/service.rs:664-686` (handle_read_with_response)
+
+#### UPDATE — 写入文件
+
+```
+Shell: write /docs/hello.txt HelloWorld
+  → fork_exec_wait("write", &["/docs/hello.txt", "HelloWorld"])
+  → exec 时写入: 0x100="/docs/hello.txt", 0x200="HelloWorld"
+
+write.asm 执行:
+  MOV R1, #1      ; flags = create
+  MOV R0, #10     ; open(path, create)
+  INT 0x80        → fd in R1
+  MOV R0, #13     ; write(fd, size=255) — 从 0x200 读取数据
+  MOV R2, #255
+  INT 0x80        → handle_file_syscall(R0=13):
+                      data = read_bytes_virt(pid, 0x200, 255)
+                      FileRequest::WriteData { fd, data }
+                      → FileService.handle_write_with_response
+                         ├─ open_file.write(data)
+                         │   ├─ file.data = data
+                         │   └─ file.dirty = true
+                         ├─ file.sync_to_disk(&disk)
+                         │   ├─ 释放旧扇区 (如有)
+                         │   ├─ allocate_sectors(needed)
+                         │   └─ write_sector(sector, data)
+                         ├─ vfs_node.size = data.len()
+                         └─ vfs_node.blocks = [new_sector]
+  MOV R0, #11     ; close(fd)
+  INT 0x80
+  HALT
+
+结果: hello.txt 内容="HelloWorld", size=10, blocks=[X] (扇区 X)
+```
+
+**代码**：`src/services/process/service.rs:1521-1523` (R0=13 处理器)，`src/services/file/service.rs:721-760` (handle_write_with_response)，`src/services/file/file.rs:260-285` (sync_to_disk)
+
+#### DELETE — 删除文件
+
+```
+Shell: rm /docs/hello.txt
+  → fork_exec_wait("rm", &["/docs/hello.txt"])
+
+rm.asm 执行:
+  MOV R0, #16     ; unlink
+  INT 0x80        → FileRequest::Unlink { path }
+                  → FileService.handle_delete
+                     ├─ vfs.lookup_path → 找到 VFSNode
+                     ├─ disk.free_sectors(node.blocks) — 释放磁盘扇区
+                     ├─ 从 parent.children 中移除
+                     └─ vfs_node.deleted = true
+  HALT
+
+结果: hello.txt 从目录树消失，磁盘扇区回收
+```
+
+**代码**：`src/services/file/service.rs:824-853` (handle_delete)，`src/hardware/disk.rs:290-310` (free_sectors)
+
+#### 完整 CRUD 链路总结
+
+```
+          Shell                 ProcessService          FileService           VFS/Disk
+           │                         │                      │                   │
+  CREATE   │─ fork_exec_wait ──────→ │─ exec(touch) ──────→ │─ open(create) ──→ create_file
+           │                         │                      │                   ├─ 分配 inode
+           │                         │                      │                   └─ save JSON
+  READ     │─ fork_exec_wait ──────→ │─ exec(cat) ────────→ │─ open → read ──→ load_from_disk
+           │                         │   ┌─ loop read       │   └─ respond      └─ read_sector
+           │                         │   └─ print!          │
+  UPDATE   │─ fork_exec_wait ──────→ │─ exec(write) ──────→ │─ open → write ──→ sync_to_disk
+           │                         │                      │                   ├─ alloc_sectors
+           │                         │                      │                   └─ write_sector
+  DELETE   │─ fork_exec_wait ──────→ │─ exec(rm) ─────────→ │─ unlink ────────→ free_sectors
+           │                         │                      │                   └─ save JSON
+```
+
+**关键设计**：
+1. 所有文件操作都走 `fork + exec + wait`，统一进程模型
+2. 元数据（文件名/大小/inode）存 JSON，文件内容存 VirtualDisk 扇区
+3. 每次操作后自动 `save_to_file`，保证崩溃一致性
+4. 扇区分配用位图（bitmap），空闲扇区用 FIFO 队列管理
