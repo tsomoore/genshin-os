@@ -1608,8 +1608,10 @@ impl ProcessService {
                         }
                     }
                     if let Ok(mut sched) = self.scheduler.lock() { sched.ready(wpid, 1, 128); }
-                    // Defer unhalt: scheduler handles this when process is picked next tick
-                    // (Avoids deadlock: cpus lock is held by handle_timer_interrupt)
+                    // Try to unhalt immediately (if cpus lock available)
+                    if let Ok(mut cpus) = self.cpus.try_lock() {
+                        if let Some(c) = cpus.get_mut(&wpid) { c.halted = false; }
+                    }
                     vprintln!("PS: sem_signal {} transferred to PID {}", sem_id, wpid);
                 } else {
                     if let Ok(mut sync) = self.sync_manager.lock() {
