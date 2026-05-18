@@ -698,8 +698,15 @@ impl ProcessService {
 
             // xv6-style: halt → Zombie (parent or init will reap)
             let is_blocked = self.process_table.lock().unwrap().get(&pid).map(|p| p.lock().ok().map(|pcb| pcb.state.is_blocked()).unwrap_or(false)).unwrap_or(false);
+            let is_ready = if let Ok(t) = self.process_table.lock() {
+                t.get(&pid).and_then(|p| p.lock().ok()).map(|pcb| pcb.state == ProcessState::Ready).unwrap_or(false)
+            } else { false };
             if pid != 1 && !is_blocked && cpus.get(&pid).map(|c| c.is_halted()).unwrap_or(false) {
-                self.scheduler.lock().unwrap().remove(pid, 1);
+                if is_ready {
+                    // Just unblocked by sem_signal — unhalt, don't zombify
+                    if let Some(cpu) = cpus.get_mut(&pid) { cpu.halted = false; }
+                } else {
+                    self.scheduler.lock().unwrap().remove(pid, 1);
                 if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
                     if let Ok(mut p) = pcb.lock() {
                         if !p.state.is_terminated() {
@@ -724,6 +731,8 @@ impl ProcessService {
                     }
                 }
             }
+                }
+
         }
         // Reaper: always scan for 1 zombie per tick (regardless of idle)
         {
