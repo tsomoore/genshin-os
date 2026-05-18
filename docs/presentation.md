@@ -1143,3 +1143,175 @@ rm.asm 执行:
 2. 元数据（文件名/大小/inode）存 JSON，文件内容存 VirtualDisk 扇区
 3. 每次操作后自动 `save_to_file`，保证崩溃一致性
 4. 扇区分配用位图（bitmap），空闲扇区用 FIFO 队列管理
+
+
+## 十二、设备管理：剪贴板与设备生命周期
+
+### 12.1 设备管理架构
+
+DeviceService 是唯一**直接订阅消息总线**的服务（不经过 Kernel 的 process_tx路由），保证设备 I/O 最低延迟。
+
+```rust
+// src/services/device/service.rs:26-40
+pub struct DeviceService {
+    bus: Arc<dyn MessageBus>,
+    receiver: Receiver<Envelope>,        // 直接订阅总线
+    clipboard: Arc<Mutex<String>>,       // 剪贴板缓冲区
+}
+```
+
+```rust
+// src/main.rs:59-61 — DeviceService 直接订阅
+let device_bus = bus.clone();
+let _device_handle = thread::spawn(move || {
+    let service = DeviceService::new(device_bus);
+    service.run();
+});
+```
+
+### 12.2 剪贴板设备
+
+唯一的物理设备实现——一个共享字符串缓冲区：
+
+```rust
+// src/services/device/service.rs:124-131
+DeviceRequest::ClipboardSet { data } => {
+    self.clipboard.lock().unwrap().clear();
+    self.clipboard.lock().unwrap().push_str(&String::from_utf8_lossy(&data));
+    // respond_success(Void)
+}
+
+DeviceRequest::ClipboardGet { max_size } => {
+    let clip = self.clipboard.lock().unwrap();
+    let bytes = clip.as_bytes();
+    let data = &bytes[..bytes.len().min(max_size)];
+    // respond_success(Bytes(data.to_vec()))
+}
+```
+
+**设计要点**：
+- `Arc<Mutex<String>>` 保证线程安全
+- write: 清空后写入（不是追加）
+- read: 返回当前内容（最多 max_size 字节）
+
+### 12.3 设备系统调用
+
+| R0 | 系统调用 | 说明 |
+|----|---------|------|
+| 208 | device_open | 请求剪贴板设备 |
+| 209 | device_close | 释放剪贴板设备 |
+| 210 | clipboard_read | 读剪贴板到 0x200，长度写入 R2 |
+| 211 | clipboard_write | 从 0x200 写数据到剪贴板 |
+
+```rust
+// src/services/process/service.rs:1670-1704 (handle_file_syscall)
+208 => { /* device_open  — 打印 [DEVICE] 日志 */ }
+209 => { /* device_close — 打印 [DEVICE] 日志 */ }
+210 => { /* clipboard_read — DeviceRequest::ClipboardGet */
+         // 数据从 DeviceService 获取，写入进程内存 0x200，R2=长度
+       }
+211 => { /* clipboard_write — DeviceRequest::ClipboardSet */
+         // 从进程内存 0x200 读取 r2 字节，发送给 DeviceService
+       }
+```
+
+### 12.4 设备生命周期：open → use → close
+
+```
+进程 A                            DeviceService
+  │                                    │
+  │ MOV R0,#208; INT 0x80 (open)       │
+  ├──────────────────────────────────→ │ 注册设备占用
+  │                                    │
+  │ MOV R0,#211; INT 0x80 (write)      │
+  ├──────────────────────────────────→ │ clipboard = "HELLO"
+  │                                    │
+  │ MOV R0,#209; INT 0x80 (close)      │
+  ├──────────────────────────────────→ │ 释放设备占用
+  │                                    │
+  │ HALT                               │
+```
+
+**clipwrite.asm** 完整演示（`programs/clipwrite.asm`）：
+
+```asm
+; 1. Request device
+MOV R0, #208    ; device_open
+INT 0x80
+
+; 2. Write "HELLO" to process memory at 0x200
+MOV R0, #0x48 ; 'H'
+STORE [0x200], R0
+MOV R0, #0x45 ; 'E'
+STORE [0x201], R0
+; ... L, L, O
+
+; 3. Send to clipboard
+MOV R0, #211    ; clipboard_write
+MOV R2, #5      ; 5 bytes
+INT 0x80
+
+; 4. Release device
+MOV R0, #209    ; device_close
+INT 0x80
+HALT
+```
+
+**clipread.asm** 读取并打印（`programs/clipread.asm`）：
+
+```asm
+MOV R0, #208    ; device_open
+INT 0x80
+
+MOV R1, #32     ; max 32 bytes
+MOV R0, #210    ; clipboard_read
+INT 0x80        ; data at 0x200, len in R2
+
+MOV R0, #2      ; print_str (from 0x200, len=R2)
+MOV R1, #0x200
+INT 0x80
+
+MOV R0, #209    ; device_close
+INT 0x80
+HALT
+```
+
+**演示**：
+
+```
+> run clipwrite       ← 写入 "HELLO"
+> run clipread        ← 读取并打印 "HELLO"
+```
+
+### 12.5 设计思想
+
+设备管理体现的是 **"申请-使用-释放"** 的资源管理模型：
+
+1. **申请**（device_open）：进程声明要使用设备，DeviceService 记录占用
+2. **使用**（read/write）：进程通过系统调用与设备交互
+3. **释放**（device_close）：进程归还设备，其他进程可以申请
+
+这个模型可以扩展到**任何设备**——键盘、显示器、磁盘、网络——只需要在 `DeviceRequest` 枚举中添加新的设备类型和操作即可。
+
+**目前支持的消息类型**：
+```rust
+DeviceRequest::RegisterDevice { device_type, name }
+DeviceRequest::UnregisterDevice { device_id }
+DeviceRequest::ListDevices
+DeviceRequest::ClipboardGet { max_size }
+DeviceRequest::ClipboardSet { data }
+DeviceRequest::Read { device_id, buf, size }
+DeviceRequest::Write { device_id, buf, size }
+```
+
+### 12.6 代码位置
+
+| 组件 | 文件 | 行号 |
+|------|------|------|
+| DeviceService 结构体 | `src/services/device/service.rs` | 26-40 |
+| clipboard 读写 | `src/services/device/service.rs` | 124-137 |
+| device_open/close (R0=208/209) | `src/services/process/service.rs` | 1670-1680 |
+| clipboard_read/write (R0=210/211) | `src/services/process/service.rs` | 1681-1704 |
+| clipwrite.asm | `programs/clipwrite.asm` | 全文 |
+| clipread.asm | `programs/clipread.asm` | 全文 |
+| DeviceService 直接订阅总线 | `src/main.rs` | 59-61 |
