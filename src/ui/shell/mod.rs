@@ -76,10 +76,7 @@ impl Shell {
     pub fn run_interactive(&mut self) {
         self.running = true;
 
-        // Start one background process (leaves CPU for user demos)
-        if let Ok(pid) = self.fork_exec_detach("loop", &[]) {
-            println!("Started loop (PID {})", pid);
-        }
+        // No startup processes — both CPUs free for user demos
         
         if self.config.show_welcome {
             self.print_welcome();
