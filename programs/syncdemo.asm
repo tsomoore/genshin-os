@@ -9,7 +9,7 @@ MOV R0, #1      ; 0x20: print '['
 MOV R1, #0x5B   ; 0x28
 INT 0x80        ; 0x30
 
-MOV R2, #10     ; 0x38: spin delay
+MOV R2, #50     ; 0x38: spin delay (50 loops) delay
 SUB R2, #1      ; 0x40
 CMP R2, #0      ; 0x48
 JNZ 0x40        ; 0x50
