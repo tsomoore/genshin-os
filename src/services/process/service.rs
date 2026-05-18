@@ -376,10 +376,8 @@ impl ProcessService {
                     if entries.is_empty() { continue; }
                     entries.sort_by_key(|(v, _, _)| *v);
                     let mut ranges: Vec<String> = Vec::new();
-                    for (vaddr, _, _) in &entries {
-                        let start = vaddr;
-                        let end = vaddr + 0xFFF;
-                        ranges.push(format!("0x{:04X}-0x{:04X}", start, end));
+                    for (vaddr, paddr, _) in &entries {
+                        ranges.push(format!("0x{:04X}→0x{:04X}", vaddr, paddr));
                     }
                     let total_kb = entries.len() * 4;
                     lines.push(format!("PID {:>3}: {} ({:>4} KB)", pid, ranges.join(", "), total_kb));
@@ -1234,8 +1232,8 @@ impl ProcessService {
 
             match signal {
                 SignalType::Terminate | SignalType::Kill => {
-                    pcb.state = ProcessState::Terminated { exit_code: 0 };
-                    println!("ProcessService: Terminated process {} ({})", pid, signal);
+                    pcb.state = ProcessState::Zombie { exit_code: 0 };
+                    println!("ProcessService: Killed process {} ({})", pid, signal);
                 }
                 SignalType::Stop => {
                     pcb.state = ProcessState::Blocked(BlockReason::WaitingForIo { device_id: 0 });
