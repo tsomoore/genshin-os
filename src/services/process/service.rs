@@ -570,6 +570,9 @@ impl ProcessService {
 
     fn handle_timer_interrupt(&self) -> GenshinResult<()> {
         // SMP: schedule one unique process per vCPU each tick
+        static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let t = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if t % 10 == 0 { if t % 10 == 0 { eprintln!("TICK {}", t); } }
         let mut scheduled_this_tick = std::collections::HashSet::new();
         for cpu_id in 0..self.cpu_count {
             let mut scheduler = Self::lock_mutex(&self.scheduler)?;
