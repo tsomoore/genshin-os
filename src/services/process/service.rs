@@ -595,10 +595,14 @@ impl ProcessService {
                 let prev = last[cpu_id];
                 if prev != Some(*pid) {
                     if let Some(prev_pid) = prev {
-                        if let Some(pcb) = self.process_table.lock().unwrap().get(&prev_pid) {
-                            if let Ok(mut p) = pcb.lock() {
-                                if p.state == ProcessState::Running {
-                                    p.state = ProcessState::Ready;
+                        // Only transition to Ready if NOT running on another CPU
+                        let busy_on_other = (0..self.cpu_count).any(|i| i != cpu_id && last[i] == Some(prev_pid));
+                        if !busy_on_other {
+                            if let Some(pcb) = self.process_table.lock().unwrap().get(&prev_pid) {
+                                if let Ok(mut p) = pcb.lock() {
+                                    if p.state == ProcessState::Running {
+                                        p.state = ProcessState::Ready;
+                                    }
                                 }
                             }
                         }
@@ -606,15 +610,7 @@ impl ProcessService {
                     last[cpu_id] = Some(*pid);
                 }
             } else {
-                if let Some(prev) = last[cpu_id] {
-                    if let Some(pcb) = self.process_table.lock().unwrap().get(&prev) {
-                        if let Ok(mut p) = pcb.lock() {
-                            if p.state == ProcessState::Running {
-                                p.state = ProcessState::Ready;
-                            }
-                        }
-                    }
-                }
+                // Idle: just clear last — process state managed by scheduler
                 last[cpu_id] = None;
             }
         }
