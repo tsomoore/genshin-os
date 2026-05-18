@@ -110,7 +110,7 @@ impl ProcessService {
         loop {
             // Process timer interrupts (max 50/iter to avoid starving receiver)
             let mut ticked = false;
-            for _ in 0..50 {
+            for _ in 0..10 {
                 match self.intr_rx.try_recv() {
                     Ok(env) => {
                         if matches!(&env.message, KernelMsg::Interrupt(_)) {
@@ -1580,12 +1580,14 @@ impl ProcessService {
                     } else { false }
                 };
                 if blocked {
-                    if let Some(p) = self.process_table.lock().unwrap().get(&pid) {
-                        if let Ok(mut pcb) = p.lock() {
-                            pcb.state = ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr: sem_id });
+                    if let Ok(table) = self.process_table.lock() {
+                        if let Some(p) = table.get(&pid) {
+                            if let Ok(mut pcb) = p.lock() {
+                                pcb.state = ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr: sem_id });
+                            }
                         }
                     }
-                    self.scheduler.lock().unwrap().block(pid, 1);
+                    if let Ok(mut sched) = self.scheduler.lock() { sched.block(pid, 1); }
                     cpu.halt();
                 }
             }
@@ -1593,28 +1595,32 @@ impl ProcessService {
                 let sem_id = r1;
                 // Find blocked waiter BEFORE signaling
                 let waiter: Option<Pid> = {
-                    let table = self.process_table.lock().unwrap();
-                    table.iter().find_map(|(&p, pcb)| {
-                        if let Ok(pcb) = pcb.lock() {
-                            if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
-                                if *lock_addr == sem_id { return Some(p); }
+                    if let Ok(table) = self.process_table.lock() {
+                        table.iter().find_map(|(&p, pcb)| {
+                            if let Ok(pcb) = pcb.lock() {
+                                if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
+                                    if *lock_addr == sem_id { return Some(p); }
+                                }
                             }
-                        }
-                        None
-                    })
+                            None
+                        })
+                    } else { None }
                 };
                 if let Some(wpid) = waiter {
-                    // Transfer ownership: unblock waiter directly (skip sem.signal increment)
-                    if let Some(p) = self.process_table.lock().unwrap().get(&wpid) {
-                        if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
+                    if let Ok(table) = self.process_table.lock() {
+                        if let Some(p) = table.get(&wpid) {
+                            if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
+                        }
                     }
-                    self.scheduler.lock().unwrap().ready(wpid, 1, 128);
-                    if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) { c.halted = false; }
+                    if let Ok(mut sched) = self.scheduler.lock() { sched.ready(wpid, 1, 128); }
+                    if let Ok(mut cpus) = self.cpus.lock() {
+                        if let Some(c) = cpus.get_mut(&wpid) { c.halted = false; }
+                    }
                     vprintln!("PS: sem_signal {} transferred to PID {}", sem_id, wpid);
                 } else {
-                    // No waiter: increment count so next sem_wait can acquire
-                    let mut sync = self.sync_manager.lock().unwrap();
-                    if let Some(sem) = sync.get_semaphore(sem_id) { sem.signal(); }
+                    if let Ok(mut sync) = self.sync_manager.lock() {
+                        if let Some(sem) = sync.get_semaphore(sem_id) { sem.signal(); }
+                    }
                 }
             }
             203 => {
