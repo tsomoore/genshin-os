@@ -376,4 +376,29 @@ mod tests {
         s.ready(1, 1, 128);
         assert_eq!(s.ready_count(), 2);
     }
+
+    #[test]
+    fn test_two_cpus_different_pids() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 2);
+        s.ready(1, 1, 128); s.ready(2, 1, 128); s.ready(3, 1, 128);
+        let d0 = s.schedule(0);
+        let d1 = s.schedule(1);
+        match (&d0, &d1) {
+            (SchedulingDecision::Run { pid: p0, .. }, SchedulingDecision::Run { pid: p1, .. }) => {
+                assert_ne!(p0, p1, "CPU0 and CPU1 must have different PIDs");
+            }
+            _ => panic!("Both CPUs should get Run decisions"),
+        }
+    }
+
+    #[test]
+    fn test_blocked_skipped_by_dequeue() {
+        let mut s = Scheduler::new(SchedulingPolicy::RoundRobin { quantum: 3 }, 2);
+        s.ready(1, 1, 128); s.ready(2, 1, 128); s.ready(3, 1, 128);
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 1, tid: 1 });
+        assert_eq!(s.schedule(1), SchedulingDecision::Run { pid: 2, tid: 1 });
+        s.block(1, 1);
+        s.schedule(0); s.schedule(0); s.schedule(0);
+        assert_eq!(s.schedule(0), SchedulingDecision::Run { pid: 3, tid: 1 });
+    }
 }
