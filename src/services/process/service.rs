@@ -285,7 +285,7 @@ impl ProcessService {
                 let pname = if program == "dual" { "busy" } else if program.starts_with("dual:") { &program[5..] } else { &program };
                 let count = if program.starts_with("dual") { 2 } else { 1 };
                 let mut shared_frame: Option<u64> = None;
-                if pname == "rwlock2" {
+                if pname == "rwlock2" || pname == "rwlock3" {
                     let mut sync = self.sync_manager.lock().unwrap();
                     sync.create_semaphore(0, 1);
                     sync.create_semaphore(0, 1);
@@ -1395,9 +1395,14 @@ impl ProcessService {
             }
         }
         let mut child_pids: Vec<Pid> = Vec::new();
-        for _ in 0..count {
+        let total = if pname == "rwlock3" { 6 } else { count };
+        for i in 0..total {
             let child = self.fork_impl(0)?;
             self.exec_impl(child, pname.to_string(), vec![])?;
+            if pname == "rwlock3" {
+                let role: u8 = if i < 5 { 0 } else { 1 };
+                self._mmu.write_u8(child, 0x200, role).ok();
+            }
             child_pids.push(child);
         }
         if let Some(frame_addr) = shared_frame {
