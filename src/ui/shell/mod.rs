@@ -76,10 +76,7 @@ impl Shell {
     pub fn run_interactive(&mut self) {
         self.running = true;
 
-        // Spawn demo processes via fork+exec (no wait — background)
-        if let Ok(pid) = self.fork_exec_detach("loop", &[]) {
-            println!("Started loop (PID {})", pid);
-        }
+        // Start one background process (leaves CPU for user demos)
         if let Ok(pid) = self.fork_exec_detach("loop", &[]) {
             println!("Started loop (PID {})", pid);
         }
