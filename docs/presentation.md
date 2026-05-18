@@ -448,3 +448,238 @@ pstree 输出:
 □ 讲内存时展示 PhysicalMemory::write_u8 = arr[addr]=value
 □ 讲进程时展示 fork_impl / exec_impl 的代码结构
 ```
+
+
+## 六、硬件 Timer：系统心跳
+
+### 6.1 本质
+
+Timer 就是一个独立线程，每隔固定时间（10ms = 100Hz）向消息总线发送一次 `Interrupt::Timer`。
+
+```rust
+// src/hardware/timer.rs:51-66
+pub struct Timer {
+    state: Arc<Mutex<TimerStateInternal>>,
+    bus: Arc<dyn MessageBus>,           // 消息总线
+    tick_interval: Duration,             // 10ms
+    tick_count: Arc<Mutex<u64>>,        // 累计 tick 数
+}
+```
+
+**核心代码**：
+
+| 组件 | 文件 | 行号 |
+|------|------|------|
+| Timer 结构体 | `src/hardware/timer.rs` | 51-66 |
+| start() 启动线程 | `src/hardware/timer.rs` | 91-146 |
+| 死循环发中断 | `src/hardware/timer.rs` | 107-141 |
+| tick_count() 查询 | `src/hardware/timer.rs` | 178-180 |
+| main.rs 创建 Timer | `src/main.rs` | 22-23 |
+
+### 6.2 工作流程
+
+```
+Timer 线程 (独立)
+  │
+  ├─ thread::sleep(10ms)
+  ├─ bus.send(KernelMsg::Interrupt(Interrupt::Timer))
+  ├─ tick_count += 1
+  └─ loop
+
+消息传递：
+  Timer → bus.send() → LockedBus → Kernel → intr_tx → ProcessService.intr_rx
+```
+
+### 6.3 验证 Timer 在工作
+
+```bash
+cargo run
+> uptime
++490 ticks | 4.90s     # ~100 ticks/s
+> uptime
++6996 ticks | 69.96s   # 持续增长
+```
+
+`uptime` 命令读取 `timer.tick_count()`。每秒增长约 100，证明 Timer 线程在正常运行。
+
+
+## 七、进程调度：SMP Round-Robin
+
+### 7.1 调度器数据结构
+
+```rust
+// src/services/process/scheduler.rs:52-63
+pub struct Scheduler {
+    ready_queue: VecDeque<ReadyQueueEntry>,  // 共享就绪队列 (FIFO)
+    cpu_current: Vec<Option<(Pid, Tid)>>,   // [N] 每核当前进程
+    cpu_ticks:   Vec<u64>,                  // [N] 每核已消耗时间片
+    time_slice:  u64,                        // 时间片大小 (3 ticks = 30ms)
+}
+```
+
+**关键设计**：每个 CPU 独立追踪 `cpu_current` 和 `cpu_ticks`。两个 CPU 共享一个就绪队列。
+
+**代码位置**：
+
+| 组件 | 文件 | 行号 |
+|------|------|------|
+| Scheduler 结构体 | `src/services/process/scheduler.rs` | 52-63 |
+| schedule(cpu_id) | `src/services/process/scheduler.rs` | 127-142 |
+| ready() 加入就绪队列 | `src/services/process/scheduler.rs` | 90-105 |
+| remove() 移除进程 | `src/services/process/scheduler.rs` | 107-116 |
+| dequeue_next() 出队(跳过忙碌PID) | `src/services/process/scheduler.rs` | 145-172 |
+
+### 7.2 schedule(cpu_id) 算法
+
+```rust
+// src/services/process/scheduler.rs:127-142
+pub fn schedule(&mut self, cpu_id: usize) -> SchedulingDecision {
+    // ① 检查当前进程时间片是否耗尽
+    if let Some((pid, tid)) = self.cpu_current[cpu_id] {
+        self.cpu_ticks[cpu_id] += 1;
+        if self.cpu_ticks[cpu_id] < self.time_slice {
+            return Run(pid);  // 继续运行
+        }
+        // 时间片耗尽 → 放回队尾
+        self.ready(pid, tid, 128);
+        self.cpu_current[cpu_id] = None;
+    }
+    // ② 从就绪队列取下一个 (跳过已在其他 CPU 上的 PID)
+    self.dequeue_next(cpu_id)
+}
+```
+
+### 7.3 时间片轮转示例（2 CPU + 3 进程）
+
+```
+Tick 1:  CPU0=schedule(0) → PID 1    CPU1=schedule(1) → PID 2
+         ready_queue = [PID 3]
+
+Tick 2:  cpu_ticks[0]=1<3 → keep PID 1
+         cpu_ticks[1]=1<3 → keep PID 2
+
+Tick 3:  cpu_ticks[0]=2<3 → keep
+         cpu_ticks[1]=2<3 → keep
+
+Tick 4:  cpu_ticks[0]=3≥3 → 到期！
+         ① ready(PID 1) → 队尾: [PID 3, PID 1]
+         ② dequeue_next(0): busy=[PID 2].
+            弹出 PID 3 → 不忙 → CPU0=PID 3 ✓
+
+         cpu_ticks[1]=3≥3 → 到期！
+         ① ready(PID 2) → 队尾: [PID 1, PID 2]
+         ② dequeue_next(1): busy=[PID 3].
+            弹出 PID 1 → 不忙 → CPU1=PID 1 ✓
+```
+
+
+## 八、Timer + 调度状态机：完整流程
+
+### 8.1 主循环（事件驱动）
+
+```rust
+// src/services/process/service.rs:110-135
+loop {
+    // ① 处理 Timer 中断 (最多 10 个/轮，防止饿死 receiver)
+    for _ in 0..10 {
+        match self.intr_rx.try_recv() {
+            Ok(env) => self.handle_timer_interrupt().ok(),
+            Err(_) => break,
+        }
+    }
+    // ② 处理进程消息 (fork/exec/wait/文件)
+    match self.receiver.try_recv() {
+        Ok(envelope) => self.handle_envelope(envelope)?,
+        Err(Empty) => sleep(1ms),
+        Err(Disconnected) => return,
+    }
+}
+```
+
+### 8.2 handle_timer_interrupt：调度 + 执行 + 回收
+
+```rust
+// src/services/process/service.rs:571-720
+fn handle_timer_interrupt(&self) {
+    for cpu_id in 0..self.cpu_count {
+        // ═══ 步骤 1: 调度 ═══
+        let decision = scheduler.schedule(cpu_id);
+
+        // ═══ 步骤 2: PCB 状态机 ═══
+        if Run(pid) {
+            // 过渡上一个进程: Running → Ready
+            if last_running[cpu_id] != pid {
+                PCB[last_running[cpu_id]].state = Ready;
+                last_running[cpu_id] = pid;
+            }
+            // 标记新进程: Ready/Creating → Running
+            PCB[pid].state = Running;
+        } else {
+            last_running[cpu_id] = None;  // CPU 空闲
+        }
+
+        // ═══ 步骤 3: CPU 执行 (3 条指令) ═══
+        let cpu = cpus.get_mut(&pid);
+        for _ in 0..3 {
+            cpu.step();  // 取指→译码→执行
+            if syscall_pending {
+                handle_file_syscall(cpu, r0, r1, r2);
+            }
+            if cpu.is_halted() { break; }
+        }
+
+        // ═══ 步骤 4: 检查 Zombie ═══
+        if !is_blocked && cpu.is_halted() {
+            PCB.state = Zombie { exit_code: 0 };
+            scheduler.remove(pid);
+        }
+    }
+
+    // ═══ 步骤 5: 收割 Zombie (每 tick 回收 1 个) ═══
+    if let Some(zombie_pid) = find_first_zombie() {
+        reap_process(zombie_pid);  // 清理 PCB + CPU + 页表帧
+    }
+}
+```
+
+### 8.3 一条完整链路
+
+```
+Timer 线程                     ProcessService 主循环
+  │                                  │
+  │ bus.send(Timer中断)               │
+  └──→ Kernel → intr_tx ──→ intr_rx  │
+                              ↓      │
+                     try_recv() 收到  │
+                              ↓      │
+                 handle_timer_interrupt()
+                              ↓
+                     scheduler.schedule(cpu_id)
+                       │
+                       ├─ 时间片未用完 → keep
+                       └─ 时间片到期 → 队尾 → 取新进程
+                              ↓
+                     PCB 状态更新 (Ready↔Running)
+                              ↓
+                     cpu.step() × 3  ← 取指·译码·执行
+                              ↓
+                     检查 Zombie → 回收
+```
+
+### 8.4 关键不变量
+
+1. **单进程单核**：同一时刻，一个 PID 最多在一个 CPU 的 `cpu_current` 中出现
+2. **时间片公平**：每个进程每轮获得恰好 `time_slice`（3 ticks = 30ms）的 CPU 时间
+3. **init 不死**：PID 1 永远不会被标记为 Zombie
+4. **阻塞 = 空闲**：Blocked 进程不在就绪队列中，不消耗 CPU 时间
+5. **Reaper 每 tick 运行**：保证 Zombie 及时回收，不堆积
+
+**代码位置汇总**：
+
+| 组件 | 文件 | 行号 |
+|------|------|------|
+| handle_timer_interrupt | `src/services/process/service.rs` | 571-720 |
+| 主循环 (run) | `src/services/process/service.rs` | 110-135 |
+| Scheduler 全部方法 | `src/services/process/scheduler.rs` | 52-195 |
+| Timer 全部方法 | `src/hardware/timer.rs` | 51-200 |
+| 调度文档 | `docs/scheduler.md` | 全文 |
