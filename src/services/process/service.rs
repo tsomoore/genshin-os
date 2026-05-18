@@ -725,19 +725,17 @@ impl ProcessService {
                     }
                 }
             }
-        } else {
-            // Idle: init reaper — scan for zombie children and free them
-            let mut to_reap = Vec::new();
-            if let Ok(table) = Self::lock_mutex(&self.process_table) {
-                for (&pid, pcb) in table.iter() {
+        }
+        // Reaper: always scan for 1 zombie per tick (regardless of idle)
+        {
+            let zombie_pid = if let Ok(table) = Self::lock_mutex(&self.process_table) {
+                table.iter().find_map(|(&pid, pcb)| {
                     if let Ok(p) = pcb.lock() {
-                        if matches!(p.state, ProcessState::Zombie { .. }) {
-                            to_reap.push(pid);
-                        }
-                    }
-                }
-            }
-            for pid in to_reap {
+                        if matches!(p.state, ProcessState::Zombie { .. }) { Some(pid) } else { None }
+                    } else { None }
+                })
+            } else { None };
+            if let Some(pid) = zombie_pid {
                 self.reap_process(pid);
             }
         }
@@ -1478,10 +1476,16 @@ impl ProcessService {
                     self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: *paddr })).ok();
                 }
 
-                // 3. Mark as Zombie with exit code
+                // 3. Mark as Zombie and release held semaphore 0
                 if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
                     if let Ok(mut p) = pcb.lock() {
                         p.state = ProcessState::Zombie { exit_code };
+                    }
+                }
+                // Release sem 0: unblock any waiter (prevent permanent deadlock)
+                if let Ok(mut sync) = self.sync_manager.lock() {
+                    if let Some(sem) = sync.get_semaphore(0) {
+                        sem.signal();
                     }
                 }
 
