@@ -730,4 +730,29 @@ mod tests {
 
         assert_eq!(mutex.wait_count(), 2);
     }
+
+    #[test]
+    fn test_semaphore_wait_acquires_then_blocks() {
+        let sem = Semaphore::new(0, 0, 1); // id=0, initial=1
+        assert_eq!(sem.wait(), SemaphoreResult::Acquired); // count 1→0
+        assert_eq!(sem.wait(), SemaphoreResult::WouldBlock); // count=0
+    }
+
+    #[test]
+    fn test_semaphore_signal_increments() {
+        let sem = Semaphore::new(0, 0, 1);
+        sem.wait(); // count 1→0
+        sem.signal(); // count 0→1
+        assert_eq!(sem.wait(), SemaphoreResult::Acquired); // count 1→0 again
+    }
+
+    #[test]
+    fn test_semaphore_binary_mutex_behavior() {
+        let sem = Semaphore::new(0, 0, 1);
+        // Only one acquirer at a time
+        assert_eq!(sem.wait(), SemaphoreResult::Acquired);
+        assert_eq!(sem.wait(), SemaphoreResult::WouldBlock);
+        sem.signal();
+        assert_eq!(sem.wait(), SemaphoreResult::Acquired);
+    }
 }
