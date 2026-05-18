@@ -632,6 +632,13 @@ impl ProcessService {
 
             let mut cpus = self.cpus.lock().map_err(|_| GenshinError::Service(ServiceError::Other { code: 60, msg: "cpus".into() }))?;
             if let Some(cpu) = cpus.get_mut(&pid) {
+                // Unhalt if process was just unblocked (sem_signal no longer does this)
+                if cpu.is_halted() {
+                    let is_ready = self.process_table.lock().unwrap()
+                        .get(&pid).and_then(|p| p.lock().ok())
+                        .map(|pcb| pcb.state == ProcessState::Ready).unwrap_or(false);
+                    if is_ready { cpu.halted = false; }
+                }
                 if !cpu.is_halted() {
                     for _ in 0..3 {
                         if cpu.is_halted() { break; }
@@ -1613,9 +1620,8 @@ impl ProcessService {
                         }
                     }
                     if let Ok(mut sched) = self.scheduler.lock() { sched.ready(wpid, 1, 128); }
-                    if let Ok(mut cpus) = self.cpus.lock() {
-                        if let Some(c) = cpus.get_mut(&wpid) { c.halted = false; }
-                    }
+                    // Defer unhalt: scheduler handles this when process is picked next tick
+                    // (Avoids deadlock: cpus lock is held by handle_timer_interrupt)
                     vprintln!("PS: sem_signal {} transferred to PID {}", sem_id, wpid);
                 } else {
                     if let Ok(mut sync) = self.sync_manager.lock() {
