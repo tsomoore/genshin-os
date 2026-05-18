@@ -348,13 +348,9 @@ impl Shell {
             }
             "dual" => {
                 let prog = command.args.get(0).map(|s| s.as_str()).unwrap_or("busy");
-                let n = if prog == "rwlock3" { 6 } else { 2 };
-                let mut pids = Vec::new();
-                for i in 0..n {
-                    let role = if prog == "rwlock3" && i == n-1 { "1" } else { "0" };
-                    pids.push(self.fork_exec_detach(prog, &[role])?);
-                }
-                println!("dual: {} ({} procs) PIDs {:?}", prog, n, pids);
+                let pid1 = self.fork_exec_detach(prog, &[])?;
+                let pid2 = self.fork_exec_detach(prog, &[])?;
+                println!("dual: {} PID {} + PID {}", prog, pid1, pid2);
                 Ok(())
             }
             "fork" => {
