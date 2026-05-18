@@ -1144,7 +1144,6 @@ impl ProcessService {
                 let mut sync = self.sync_manager.lock().unwrap();
                 sync.create_semaphore(0, 1);
                 sync.create_semaphore(0, 1);
-                sync.create_semaphore(0, 1); // sem 3: rd (reader-priority)
                 drop(sync);
                 if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(
                     crate::messaging::MemoryRequest::AllocFrame { count: 1, pid: 0 }
