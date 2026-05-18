@@ -10,9 +10,9 @@ MOV R3, #3        ; 0x18: iterations
 MOV R1, #1        ; 0x20: mutex.wait(1)
 MOV R0, #201      ; 0x28
 INT 0x80          ; 0x30
-LOAD R2, [0x1000] ; 0x38: count++
+LOAD R2, [0x10000] ; 0x38: count++
 ADD R2, #1        ; 0x40
-STORE [0x1000], R2; 0x48
+STORE [0x10000], R2; 0x48
 CMP R2, #1        ; 0x50
 JNZ 0x78          ; 0x58: not first
 MOV R1, #2        ; 0x60: wrt.wait(2)
@@ -27,9 +27,9 @@ INT 0x80          ; 0xA0
 MOV R1, #1        ; 0xA8: mutex.wait(1)
 MOV R0, #201      ; 0xB0
 INT 0x80          ; 0xB8
-LOAD R2, [0x1000] ; 0xC0: count--
+LOAD R2, [0x10000] ; 0xC0: count--
 SUB R2, #1        ; 0xC8
-STORE [0x1000], R2; 0xD0
+STORE [0x10000], R2; 0xD0
 CMP R2, #0        ; 0xD8
 JNZ 0x100         ; 0xE0: not last
 MOV R1, #2        ; 0xE8: wrt.signal(2)
