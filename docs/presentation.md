@@ -683,3 +683,125 @@ Timer 线程                     ProcessService 主循环
 | Scheduler 全部方法 | `src/services/process/scheduler.rs` | 52-195 |
 | Timer 全部方法 | `src/hardware/timer.rs` | 51-200 |
 | 调度文档 | `docs/scheduler.md` | 全文 |
+
+
+## 九、进程同步：信号量与互斥
+
+### 9.1 信号量数据结构
+
+```rust
+// src/services/process/sync.rs:41-52
+pub struct Semaphore {
+    id: SemaphoreId,              // 信号量 ID
+    owner_pid: Pid,               // 创建者
+    value: AtomicU64,             // 当前计数（原子操作）
+    wait_count: AtomicU64,        // 等待者数量
+}
+```
+
+全局信号量 0 在系统启动时预创建：
+```rust
+// src/services/process/sync.rs:409-417
+pub fn new() -> Self {
+    let mut sm = Self { ... };
+    sm.create_semaphore(0, 1);    // 二元信号量，初始值=1
+    sm
+}
+```
+
+### 9.2 系统调用接口
+
+| R0 | 系统调用 | 参数 | 语义 |
+|----|---------|------|------|
+| 201 | sem_wait(sem_id) | R1=sem_id | P 操作：count=0 则阻塞，count>0 则 count-- |
+| 202 | sem_signal(sem_id) | R1=sem_id | V 操作：有等待者转移所有权，无等待者 count++ |
+
+### 9.3 sem_wait 处理器
+
+```rust
+// src/services/process/service.rs:1560-1579 (handle_file_syscall 内)
+201 => {
+    let sem_id = r1;
+    let blocked = {
+        let sync = self.sync_manager.lock().unwrap();
+        let sem = sync.get_semaphore(sem_id);
+        sem.wait() != SemaphoreResult::Acquired  // 原子 CAS
+    };
+    if blocked {
+        // 1. PCB 设为 Blocked
+        pcb.state = Blocked(WaitingForLock { lock_addr: sem_id });
+        // 2. 从调度器就绪队列移除
+        scheduler.block(pid, 1);
+        // 3. CPU 停机
+        cpu.halt();
+    }
+}
+```
+
+### 9.4 sem_signal 处理器（TOCTOU 修复）
+
+```rust
+// src/services/process/service.rs:1580-1619
+202 => {
+    // 扫描进程表，找阻塞在本信号量上的等待者
+    let waiter = process_table.iter().find_map(|(&p, pcb)| {
+        if pcb.state == Blocked(WaitingForLock { lock_addr: sem_id }) {
+            Some(p)
+        } else { None }
+    });
+
+    if let Some(wpid) = waiter {
+        // 转移所有权：直接唤醒等待者
+        PCB[wpid].state = Ready;
+        scheduler.ready(wpid);
+        cpu.halted = false;  // try_lock 安全 unhalt
+        // count 不变！调用者下次 sem_wait 会阻塞
+    } else {
+        sem.signal();  // 无等待者：count++
+    }
+}
+```
+
+**TOCTOU 修复**：有等待者时直接转移所有权，不 count++。避免了调用者在释放瞬间立刻用 sem_wait 抢回去的竞争。
+
+### 9.5 阻塞与唤醒的完整链路
+
+```
+进程 A (持有锁)                  进程 B (等待锁)
+  │                                │
+  │ sem_signal(0)                   │ (Blocked, cpu.halted)
+  ├─ 扫描 process_table             │
+  ├─ 找到 B: Blocked(lock=0)        │
+  ├─ B.state = Ready                │
+  ├─ scheduler.ready(B) ──────────→ 加入就绪队列
+  ├─ B.cpu.halted = false ────────→ 唤醒 CPU
+  │                                │
+  │ sem_wait(0)                     │ (下一 tick 被调度)
+  │ count=0 → Blocked!              ├─ 进入临界区
+  │ cpu.halt()                      │ print '['
+  │                                │ sem_signal(0) → 唤醒 A
+  └─ [HALTED]                       └─ ...
+```
+
+### 9.6 演示：syncdemo 互斥
+
+```
+> dual syncdemo     ← 两个进程争用信号量 0
+> pmon              ← PID 2 Running, PID 3 Blocked
+> verbose on        ← 看输出：93 91 93 91 交替
+```
+
+互斥证据：绝不会出现连续两个 `[PRINT] 91`（即 `[`）中间没有 `]`。
+
+**代码位置汇总**：
+
+| 组件 | 文件 | 行号 |
+|------|------|------|
+| Semaphore 结构体 | `src/services/process/sync.rs` | 41-52 |
+| sem_wait 处理器 | `src/services/process/service.rs` | 1560-1579 |
+| sem_signal 处理器 (TOCTOU) | `src/services/process/service.rs` | 1580-1619 |
+| 信号量 0 预创建 | `src/services/process/sync.rs` | 409-417 |
+| 调度器 block/ready | `src/services/process/scheduler.rs` | 107-116, 90-105 |
+| Zombie 检查 (unhalt Ready) | `src/services/process/service.rs` | 699-710 |
+| syncdemo.asm | `programs/syncdemo.asm` | 全文 |
+| syncdemo 文档 | `docs/syncdemo.md` | 全文 |
