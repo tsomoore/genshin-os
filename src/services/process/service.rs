@@ -108,15 +108,20 @@ impl ProcessService {
         }
 
         loop {
-            // Drain all pending timer interrupts, then check for process messages
+            // Process timer interrupts (max 50/iter to avoid starving receiver)
             let mut ticked = false;
-            while let Ok(env) = self.intr_rx.try_recv() {
-                if matches!(&env.message, KernelMsg::Interrupt(_)) {
-                    self.handle_timer_interrupt().ok();
-                    ticked = true;
+            for _ in 0..50 {
+                match self.intr_rx.try_recv() {
+                    Ok(env) => {
+                        if matches!(&env.message, KernelMsg::Interrupt(_)) {
+                            self.handle_timer_interrupt().ok();
+                            ticked = true;
+                        }
+                    }
+                    Err(_) => break,
                 }
             }
-            // Process one message from kernel (non-blocking)
+            // Always check receiver
             match self.receiver.try_recv() {
                 Ok(envelope) => {
                     if let Err(e) = self.handle_envelope(envelope) {
@@ -124,9 +129,7 @@ impl ProcessService {
                     }
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => {
-                    if !ticked {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
+                    if !ticked { std::thread::sleep(std::time::Duration::from_millis(1)); }
                 }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     eprintln!("Message bus disconnected");
