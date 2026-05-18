@@ -1,5 +1,5 @@
 ; syncdemo.asm — Semaphore mutual exclusion demo (5 iterations)
-MOV R3, #5      ; 0x00: counter
+MOV R3, #100     ; 0x00: counter (100 iterations)
 
 MOV R1, #0      ; 0x08: sem_id=0
 MOV R0, #201    ; 0x10: sem_wait(0)
