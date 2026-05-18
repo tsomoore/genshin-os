@@ -376,8 +376,9 @@ impl ProcessService {
                     if entries.is_empty() { continue; }
                     entries.sort_by_key(|(v, _, _)| *v);
                     let mut ranges: Vec<String> = Vec::new();
-                    for (vaddr, paddr, _) in &entries {
-                        ranges.push(format!("V:0x{:04X}→P:0x{:04X}", vaddr, paddr));
+                    for (_, paddr, _) in &entries {
+                        let pend = paddr + 0xFFF;
+                        ranges.push(format!("0x{:04X}-0x{:04X}", paddr, pend));
                     }
                     let total_kb = entries.len() * 4;
                     lines.push(format!("PID {:>3}: {} ({:>4} KB)", pid, ranges.join(", "), total_kb));
