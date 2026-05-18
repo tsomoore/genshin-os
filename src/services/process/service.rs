@@ -1135,27 +1135,25 @@ impl ProcessService {
             let mut pcb = p.lock().unwrap();
             pcb.name = executable.clone(); pcb.args = args; pcb.state = ProcessState::Ready;
         }
-        // rwlock3: set up shared memory + role (first call creates sems+frame)
+        // rwlock3: set up shared memory (role passed as arg[0] at 0x100)
         if executable == "rwlock3" {
-            static RW3_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             static RW3_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let n = RW3_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if n == 0 {
+            let mut frame = RW3_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+            if frame == 0 {
                 let mut sync = self.sync_manager.lock().unwrap();
-                sync.create_semaphore(0, 1);
-                sync.create_semaphore(0, 1);
+                sync.create_semaphore(0, 1); sync.create_semaphore(0, 1);
                 drop(sync);
                 if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(
                     crate::messaging::MemoryRequest::AllocFrame { count: 1, pid: 0 }
                 )) {
                     if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
                         if let Some(crate::messaging::ResponseData::PhysicalAddr(addr)) = resp.data() {
-                            RW3_FRAME.store(*addr, std::sync::atomic::Ordering::Relaxed);
+                            frame = *addr;
+                            RW3_FRAME.store(frame, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                 }
             }
-            let frame = RW3_FRAME.load(std::sync::atomic::Ordering::Relaxed);
             if frame != 0 {
                 if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(
                     crate::messaging::MemoryRequest::MapPage {
@@ -1164,8 +1162,6 @@ impl ProcessService {
                     }
                 )) { let _ = rx.recv_timeout(std::time::Duration::from_secs(1)); }
             }
-            let role: u8 = if n < 5 { 0 } else { 1 };
-            self._mmu.write_u8(pid, 0x200, role).ok();
         }
         // Re-schedule: exec resets the process, must be in ready queue
         self.handle_schedule(pid, 1)?;

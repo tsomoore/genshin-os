@@ -1,8 +1,8 @@
 ; rwlock3.asm — Reader-priority (2 semaphores only)
 ; sem1=mutex sem2=wrt. Role at 0x200. Shared count at 0x10000.
 
-LOAD R3, [0x200]  ; 0x00: role
-CMP R3, #0        ; 0x08
+LOAD R3, [0x100]  ; 0x00: role (ascii 0x30=reader 0x31=writer)
+CMP R3, #0x31     ; 0x08: is writer?
 JNZ 0x148         ; 0x10: writer
 
 ; ═══ READER ═══
