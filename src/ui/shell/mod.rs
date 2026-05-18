@@ -348,9 +348,18 @@ impl Shell {
             }
             "dual" => {
                 let prog = command.args.get(0).map(|s| s.as_str()).unwrap_or("busy");
-                let pid1 = self.fork_exec_detach(prog, &[])?;
-                let pid2 = self.fork_exec_detach(prog, &[])?;
-                println!("dual: {} PID {} + PID {}", prog, pid1, pid2);
+                if prog == "rwlock3" {
+                    // Use Spawn for shared memory + role setup
+                    let msg = KernelMsg::Process(crate::messaging::ProcessRequest::Spawn {
+                        program: "dual:rwlock3".into(), params: vec![],
+                    });
+                    self.send_and_wait(msg)?;
+                    println!("dual: rwlock3 (6 procs via spawn)");
+                } else {
+                    let pid1 = self.fork_exec_detach(prog, &[])?;
+                    let pid2 = self.fork_exec_detach(prog, &[])?;
+                    println!("dual: {} PID {} + PID {}", prog, pid1, pid2);
+                }
                 Ok(())
             }
             "fork" => {
