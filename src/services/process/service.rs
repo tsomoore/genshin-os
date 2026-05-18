@@ -634,9 +634,10 @@ impl ProcessService {
             if let Some(cpu) = cpus.get_mut(&pid) {
                 // Unhalt if process was just unblocked (sem_signal no longer does this)
                 if cpu.is_halted() {
-                    let is_ready = self.process_table.lock().unwrap()
-                        .get(&pid).and_then(|p| p.lock().ok())
-                        .map(|pcb| pcb.state == ProcessState::Ready).unwrap_or(false);
+                    let is_ready = if let Ok(t) = self.process_table.lock() {
+                        t.get(&pid).and_then(|p| p.lock().ok())
+                            .map(|pcb| pcb.state == ProcessState::Ready).unwrap_or(false)
+                    } else { false };
                     if is_ready { cpu.halted = false; }
                 }
                 if !cpu.is_halted() {
