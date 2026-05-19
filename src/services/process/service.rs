@@ -1466,7 +1466,7 @@ impl ProcessService {
 
                 vprintln!("PS: PID {} exited with code {}", pid, exit_code);
             },
-            1 => eprintln!("[PRINT] {}", r1 as i64),
+            1 => vprintln!("[PRINT] {}", r1 as i64),
             2 => {
                 let data = self.read_bytes_virt(pid, r1, r2 as usize);
                 let s = String::from_utf8_lossy(&data);
