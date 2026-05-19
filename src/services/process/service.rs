@@ -1029,9 +1029,9 @@ impl ProcessService {
         let _ = self.bus.send_request(KernelMsg::File(crate::messaging::FileRequest::CloneFds {
             from_pid: parent_pid, to_pid: child_pid,
         })).map(|rx| rx.recv_timeout(std::time::Duration::from_millis(100)));
-        // Schedule child immediately — runs from parent's PC with R0=0
-        self.handle_schedule(child_pid, 1)?;
-        vprintln!("PS: Fork {} -> {} (child scheduled, R0=0)", parent_pid, child_pid);
+        // Do NOT schedule child here — it has parent's code or no code.
+        // exec_impl will schedule after loading the proper program.
+        vprintln!("PS: Fork {} -> {} (not scheduled, waiting for exec)", parent_pid, child_pid);
         Ok(child_pid)
     }
     /// Process pending fork requests (called from main loop, not timer)
