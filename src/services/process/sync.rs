@@ -262,6 +262,11 @@ impl MutexLock {
         }
     }
 
+    /// Set owner directly (for TOCTOU transfer)
+    pub fn set_owner(&self, pid: crate::messaging::Pid) {
+        self.owner.store(pid as u64, Ordering::Release);
+    }
+
     /// Check if lock is held
     pub fn is_locked(&self) -> bool {
         self.owner.load(Ordering::Acquire) != u64::MAX

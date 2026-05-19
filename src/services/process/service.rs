@@ -1663,6 +1663,12 @@ impl ProcessService {
                     }
                     self.scheduler.lock().unwrap().ready(wpid, 1, 128);
                     if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) { c.halted = false; }
+                    // Update mutex owner to the waiter (TOCTOU transfer)
+                    if let Ok(mut sync) = self.sync_manager.lock() {
+                        if let Some(mutex) = sync.get_mutex(lock_id) {
+                            mutex.set_owner(wpid);
+                        }
+                    }
                 } else {
                     let Ok(mut sync) = self.sync_manager.lock() else { return; };
                     if let Some(mutex) = sync.get_mutex(lock_id) { mutex.release(pid); }
