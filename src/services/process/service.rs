@@ -685,7 +685,7 @@ impl ProcessService {
             // xv6-style: halt → Zombie (parent or init will reap)
             let is_blocked = if let Ok(t) = self.process_table.lock() { t.get(&pid).and_then(|p| p.lock().ok()).map(|p| p.state.is_blocked()).unwrap_or(false) } else { false };
             let is_ready = if let Ok(t) = self.process_table.lock() {
-                t.get(&pid).and_then(|p| p.lock().ok()).map(|pcb| pcb.state == ProcessState::Ready || pcb.state == ProcessState::Running).unwrap_or(false)
+                t.get(&pid).and_then(|p| p.lock().ok()).map(|pcb| pcb.state == ProcessState::Ready).unwrap_or(false)
             } else { false };
             if pid != 1 && !is_blocked && cpus.get(&pid).map(|c| c.is_halted()).unwrap_or(false) {
                 if is_ready {
