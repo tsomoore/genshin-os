@@ -657,30 +657,16 @@ impl ProcessService {
                             }
                             if cpu.is_halted() { break; }
                         }
-                        // Handle bus-based interrupts (pagefault etc)
-                        for _ in 0..5 {
-                            while let Ok(env) = self.intr_rx.try_recv() {
-                                if let KernelMsg::Interrupt(int) = &env.message {
-                                    match int {
-                                        crate::messaging::Interrupt::SyscallTrap => {
-                                            // Already handled via syscall_pending above; skip
-                                        }
-                                        crate::messaging::Interrupt::PageFault { addr, .. } => {
-                                            if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(
-                                                crate::messaging::MemoryRequest::PageFaultHandler {
-                                                    pid: cpu.pid(), faulting_addr: *addr,
-                                                    access_type: crate::messaging::AccessType::Read,
-                                                })) {
-                                                let _ = rx.recv_timeout(std::time::Duration::from_millis(200));
-                                            }
-                                            cpu.pagefault_pending = false;
-                                        }
-                                        _ => {}
-                                    }
-                                }
+                        // Handle pagefault (set by cpu.step() when MMU misses)
+                        if cpu.pagefault_pending {
+                            cpu.pagefault_pending = false;
+                            if let Ok(rx) = self.bus.send_request(KernelMsg::Memory(
+                                crate::messaging::MemoryRequest::PageFaultHandler {
+                                    pid: cpu.pid(), faulting_addr: cpu.pc(),
+                                    access_type: crate::messaging::AccessType::Read,
+                                })) {
+                                let _ = rx.recv_timeout(std::time::Duration::from_millis(200));
                             }
-                            if cpu.pagefault_pending { break; }
-                            std::thread::sleep(std::time::Duration::from_micros(50));
                         }
                     }
                     let s = cpu.dump_state();

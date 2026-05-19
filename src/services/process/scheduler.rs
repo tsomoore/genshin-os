@@ -179,6 +179,8 @@ impl Scheduler {
     /// How many processes are in the ready queue
     pub fn ready_count(&self) -> usize { self.ready_queue.len() + self.priority_queue.len() }
 
+    pub fn queue_pids(&self) -> Vec<Pid> { self.ready_queue.iter().map(|e| e.pid).collect() }
+
     /// Get current process on a CPU
     pub fn current_on(&self, cpu_id: usize) -> Option<(Pid, Tid)> {
         self.cpu_current.get(cpu_id).and_then(|c| *c)

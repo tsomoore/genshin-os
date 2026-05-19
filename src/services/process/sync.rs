@@ -416,7 +416,7 @@ impl SyncManager {
             semaphores: HashMap::new(),
             mutexes: HashMap::new(),
             next_sem_id: 0,
-            next_mutex_id: 1,
+            next_mutex_id: 0,
         };
         // Pre-create global semaphore 0 (binary mutex) for rwlock/dual demos
         sm.create_semaphore(0, 1);
