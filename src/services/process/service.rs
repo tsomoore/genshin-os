@@ -1,9 +1,7 @@
 use crate::vprintln;
 // ProcessService - Main Process Management Service
 //
-// 曾国藩曰：
-// "为将之道，当知进退，明赏罚。"
-// 进程服务管理进程之生死、调度与通信，当公平高效。
+
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -27,8 +25,7 @@ use super::scheduler::{Scheduler, SchedulingPolicy, SchedulingDecision};
 
 /// Process Service - Main process management service
 ///
-/// 曾国藩曰：
-/// "治军如治家，赏罚分明，进退有度。"
+
 /// 进程服务统筹进程管理、调度、IPC与同步，确保系统高效运行。
 
 pub struct ProcessService {
@@ -1442,276 +1439,346 @@ impl ProcessService {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════
+    // System call dispatch table
+    // ═══════════════════════════════════════════════════════════
+    // Each syscall is a separate handler method below.
+    // File syscalls (10-18) forward to FileService via the bus.
+    // ProcessService does NOT print results — the .asm program
+    // uses R0=2 (print string from memory at 0x200) to output.
+
     fn handle_file_syscall(&self, cpu: &mut crate::hardware::VirtualCPU, r0: u64, r1: u64, r2: u64) {
         let pid = cpu.pid();
-        let path = self.read_string_virt(pid, 0x100);
-        use crate::messaging::{FileRequest, OpenFlags, ResponseData};
         match r0 {
-            0 => {
-                if pid == 1 { return; } // init never exits
-                let exit_code = r1 as i32;
-
-                // 1. Unmap and free all pages
-
-                // 2. Unmap and free all pages
-                let entries = self._mmu.get_page_entries(pid);
-                let frame_count = entries.len();
-                vprintln!("PS: exit({}) pid={} — freeing {} pages", exit_code, pid, frame_count);
-                for (vaddr, paddr, _) in &entries {
-                    self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: *vaddr })).ok();
-                    self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: *paddr })).ok();
-                }
-
-                // 3. Mark as Zombie and release held semaphore 0
-                if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
-                    if let Ok(mut p) = pcb.lock() {
-                        p.state = ProcessState::Zombie { exit_code };
-                    }
-                }
-                // Release sem 0: unblock any waiter (prevent permanent deadlock)
-                if let Ok(mut sync) = self.sync_manager.lock() {
-                    if let Some(sem) = sync.get_semaphore(0) {
-                        if sem.value() == 0 { sem.signal(); }
-                    }
-                }
-
-                // 4. Remove from scheduler
-                self.scheduler.lock().unwrap().block(pid, 1);
-
-                // 5. Halt CPU
-                cpu.halt();
-
-                vprintln!("PS: PID {} exited with code {}", pid, exit_code);
-            },
-            1 => vprintln!("[PRINT] {}", r1 as i64),
-            2 => {
-                let data = self.read_bytes_virt(pid, r1, r2 as usize);
-                let s = String::from_utf8_lossy(&data);
-                vprintln!("{}", s);
-            },
-            10 => {
-                let flags = if r1 == 0 { OpenFlags::read_only() } else { OpenFlags::create() };
-                if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Open { path, flags })) {
-                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                        if let Some(ResponseData::Fd(fd)) = resp.data() {
-                            cpu.write_register(crate::hardware::Register::R1, *fd as u64);
-                        }
-                    }
-                }
-            }
-            11 => { self.bus.send(KernelMsg::File(FileRequest::Close { fd: r1 as u32 })).ok(); }
-            12 => {
-                // Loop-read until EOF for cat-like behavior
-                let fd = r1 as u32;
-                let mut offset = 0u64;
-                let chunk = std::cmp::min(r2, 256) as usize;
-                loop {
-                    if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Read { fd, offset, buf: 0, size: chunk })) {
-                        if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                            if let Some(ResponseData::Bytes(data)) = resp.data() {
-                                if data.is_empty() { break; }
-                                print!("{}", String::from_utf8_lossy(&data));
-                                use std::io::Write;
-                                let _ = std::io::stdout().flush();
-                                offset += data.len() as u64;
-                                if data.len() < chunk { break; }
-                            } else { break; }
-                        } else { break; }
-                    } else { break; }
-                }
-                println!(); // newline after file content
-            }
-            13 => {
-                let data = self.read_bytes_virt(pid, 0x200, r2 as usize);
-                self.bus.send(KernelMsg::File(FileRequest::WriteData { fd: r1 as u32, data })).ok();
-            }
-            14 => { self.bus.send(KernelMsg::File(FileRequest::CreateDirectory { path })).ok(); }
-            16 => { self.bus.send(KernelMsg::File(FileRequest::Unlink { path })).ok(); }
-            17 => { self.bus.send(KernelMsg::File(FileRequest::Stat { path })).ok(); }
-            18 => {
-                if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::ListDir { path })) {
-                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                        if let Some(ResponseData::StringList(entries)) = resp.data() {
-                            for e in entries { println!("{}", e); }
-                        }
-                    }
-                }
-            }
-            // ========== Process syscalls (triggered by CPU INT) ==========
-            100 => {
-                // FORK: synchronous clone — child runs from same PC with R0=0
-                match self.fork_impl(pid) {
-                    Ok(child_pid) => {
-                        cpu.write_register(crate::hardware::Register::R0, child_pid);
-                    }
-                    Err(_) => {
-                        cpu.write_register(crate::hardware::Register::R0, 0);
-                    }
-                }
-            }
-            101 => {
-                // EXEC: replace current process with program at 0x100
-                let prog = self.read_string_virt(pid, 0x100);
-                let _ = self.exec_impl(pid, prog, vec![]);
-                // If exec succeeded, CPU was reset. If failed, continue.
-            }
-            102 => {
-                // TREE: recursively list directory tree
-                let path = self.read_string_virt(pid, 0x100);
-                let tree = self.build_tree(&path);
-                for line in &tree { println!("{}", line); }
-            }
-            // ── Synchronization syscalls ──
-            200 => {
-                // SEM_CREATE: returns sem_id in R1
-                let Ok(mut sync) = self.sync_manager.lock() else { return; };
-                let sem_id = sync.create_semaphore(pid, 1);
-                cpu.write_register(crate::hardware::Register::R1, sem_id);
-            }
-            201 => {
-                // SEM_WAIT(sem_id): block if count=0
-                let sem_id = r1;
-                let blocked = {
-                    let Ok(sync) = self.sync_manager.lock() else { return; };
-                    if let Some(sem) = sync.get_semaphore(sem_id) {
-                        sem.wait() != super::sync::SemaphoreResult::Acquired
-                    } else { false }
-                };
-                if blocked {
-                    if let Ok(table) = self.process_table.lock() {
-                        if let Some(p) = table.get(&pid) {
-                            if let Ok(mut pcb) = p.lock() {
-                                pcb.state = ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr: sem_id });
-                            }
-                        }
-                    }
-                    if let Ok(mut sched) = self.scheduler.lock() { sched.block(pid, 1); }
-                    cpu.halt();
-                }
-            }
-            202 => {
-                let sem_id = r1;
-                // Find blocked waiter BEFORE signaling
-                let waiter: Option<Pid> = {
-                    if let Ok(table) = self.process_table.lock() {
-                        table.iter().find_map(|(&p, pcb)| {
-                            if let Ok(pcb) = pcb.lock() {
-                                if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
-                                    if *lock_addr == sem_id { return Some(p); }
-                                }
-                            }
-                            None
-                        })
-                    } else { None }
-                };
-                if let Some(wpid) = waiter {
-                    if let Ok(table) = self.process_table.lock() {
-                        if let Some(p) = table.get(&wpid) {
-                            if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
-                        }
-                    }
-                    if let Ok(mut sched) = self.scheduler.lock() { sched.ready(wpid, 1, 128); }
-                    // Try to unhalt immediately (if cpus lock available)
-                    if let Ok(mut cpus) = self.cpus.try_lock() {
-                        if let Some(c) = cpus.get_mut(&wpid) { c.halted = false; }
-                    }
-                    vprintln!("PS: sem_signal {} transferred to PID {}", sem_id, wpid);
-                } else {
-                    if let Ok(mut sync) = self.sync_manager.lock() {
-                        if let Some(sem) = sync.get_semaphore(sem_id) { sem.signal(); }
-                    }
-                }
-            }
-            203 => {
-                // LOCK_CREATE: returns lock_id in R1
-                let mut sync = self.sync_manager.lock().unwrap();
-                let lock_id = sync.create_mutex(pid, false);
-                cpu.write_register(crate::hardware::Register::R1, lock_id);
-            }
-            204 => {
-                // LOCK_ACQUIRE(lock_id): block if locked
-                let lock_id = r1;
-                let blocked = {
-                    let sync = self.sync_manager.lock().unwrap();
-                    if let Some(mutex) = sync.get_mutex(lock_id) {
-                        mutex.try_acquire(pid) != super::sync::MutexResult::Acquired
-                    } else { false }
-                };
-                if blocked {
-                    if let Some(p) = self.process_table.lock().unwrap().get(&pid) {
-                        if let Ok(mut pcb) = p.lock() {
-                            pcb.state = ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr: lock_id });
-                        }
-                    }
-                    self.scheduler.lock().unwrap().block(pid, 1);
-                    cpu.halt();
-                }
-            }
-            205 => {
-                let lock_id = r1;
-                let waiter: Option<Pid> = {
-                    let table = self.process_table.lock().unwrap();
-                    table.iter().find_map(|(&p, pcb)| {
-                        if let Ok(pcb) = pcb.lock() {
-                            if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
-                                if *lock_addr == lock_id { return Some(p); }
-                            }
-                        }
-                        None
-                    })
-                };
-                if let Some(wpid) = waiter {
-                    if let Some(p) = self.process_table.lock().unwrap().get(&wpid) {
-                        if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
-                    }
-                    self.scheduler.lock().unwrap().ready(wpid, 1, 128);
-                    if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) {
-                        c.halted = false;
-                        // Rewind PC to re-execute the INT that caused the block
-                        let pc = c.pc();
-                        if pc >= 8 { c.set_pc(pc - 8); }
-                    }
-                    // Release lock (waiter will acquire on its own via try_acquire)
-                    if let Ok(mut sync) = self.sync_manager.lock() {
-                        if let Some(mutex) = sync.get_mutex(lock_id) {
-                            mutex.release(pid);
-                        }
-                    }
-                } else {
-                    let Ok(mut sync) = self.sync_manager.lock() else { return; };
-                    if let Some(mutex) = sync.get_mutex(lock_id) { mutex.release(pid); }
-                }
-            }
-            // ── Device syscalls ──
-            208 => {
-                // Device open: request clipboard device
-                println!("[DEVICE] pid={} requests clipboard", pid);
-                cpu.write_register(crate::hardware::Register::R1, 0); // device_id = 0
-            }
-            209 => {
-                // Device close: release clipboard device
-                println!("[DEVICE] pid={} releases clipboard", pid);
-            }
-            210 => {
-                let max_size = r1 as usize;
-                if let Ok(rx) = self.bus.send_request(KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardGet { max_size })) {
-                    if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                        if let Some(ResponseData::Bytes(data)) = resp.data() {
-                            for (i, &b) in data.iter().enumerate() {
-                                let _ = self._mmu.write_u8(pid, 0x200 + i as u64, b);
-                            }
-                            cpu.write_register(crate::hardware::Register::R2, data.len() as u64);
-                        }
-                    }
-                }
-            }
-            211 => {
-                let size = r2 as usize;
-                let data = self.read_bytes_virt(pid, 0x200, size);
-                self.bus.send(KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardSet { data })).ok();
-            }
+            // ── Lifecycle ──
+            0 => self.syscall_exit(cpu, pid, r1),
+            // ── Console I/O ──
+            1 => self.syscall_print_char(cpu, pid, r1),
+            2 => self.syscall_print_str(cpu, pid, r1, r2),
+            // ── File operations → forwarded to FileService ──
+            10 => self.syscall_open(cpu, pid, r1),
+            11 => { self.bus.send(KernelMsg::File(crate::messaging::FileRequest::Close { fd: r1 as u32 })).ok(); }
+            12 => self.syscall_read(cpu, pid, r1, r2),
+            13 => self.syscall_write(cpu, pid, r1, r2),
+            14 => self.syscall_mkdir(cpu, pid),
+            16 => self.syscall_unlink(cpu, pid),
+            17 => self.syscall_stat(cpu, pid),
+            18 => self.syscall_listdir(cpu, pid),
+            // ── Process ──
+            100 => self.syscall_fork(cpu, pid),
+            101 => self.syscall_exec(cpu, pid),
+            102 => self.syscall_tree(cpu, pid),
+            // ── Synchronization ──
+            200 => self.syscall_sem_create(cpu, pid),
+            201 => self.syscall_sem_wait(cpu, pid, r1),
+            202 => self.syscall_sem_signal(cpu, pid, r1),
+            203 => self.syscall_lock_create(cpu, pid),
+            204 => self.syscall_lock_acquire(cpu, pid, r1),
+            205 => self.syscall_lock_release(cpu, pid, r1),
+            // ── Device ──
+            208 => self.syscall_device_open(cpu, pid),
+            209 => self.syscall_device_close(cpu, pid),
+            210 => self.syscall_device_read(cpu, pid, r1),
+            211 => self.syscall_device_write(cpu, pid, r1, r2),
             _ => {}
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Lifecycle syscalls
+    // ═══════════════════════════════════════════════════════════
+
+    fn syscall_exit(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64, exit_code_raw: u64) {
+        if pid == 1 { return; }
+        let exit_code = exit_code_raw as i32;
+        let entries = self._mmu.get_page_entries(pid);
+        let frame_count = entries.len();
+        vprintln!("PS: exit({}) pid={} — freeing {} pages", exit_code, pid, frame_count);
+        for (vaddr, paddr, _) in &entries {
+            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::UnmapPage { pid, virt: *vaddr })).ok();
+            self.bus.send(KernelMsg::Memory(crate::messaging::MemoryRequest::FreeFrame { paddr: *paddr })).ok();
+        }
+        if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
+            if let Ok(mut p) = pcb.lock() {
+                p.state = ProcessState::Zombie { exit_code };
+            }
+        }
+        if let Ok(mut sync) = self.sync_manager.lock() {
+            if let Some(sem) = sync.get_semaphore(0) {
+                if sem.value() == 0 { sem.signal(); }
+            }
+        }
+        self.scheduler.lock().unwrap().block(pid, 1);
+        cpu.halt();
+        vprintln!("PS: PID {} exited with code {}", pid, exit_code);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Console I/O syscalls
+    // ═══════════════════════════════════════════════════════════
+
+    fn syscall_print_char(&self, _cpu: &mut crate::hardware::VirtualCPU, _pid: u64, r1: u64) {
+        vprintln!("[PRINT] {}", r1 as i64);
+    }
+
+    fn syscall_print_str(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64, r1: u64, r2: u64) {
+        let data = self.read_bytes_virt(pid, r1, r2 as usize);
+        let s = String::from_utf8_lossy(&data);
+        vprintln!("{}", s);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // File system syscalls — all forwarded to FileService via bus
+    // ═══════════════════════════════════════════════════════════
+
+    fn get_syscall_path(&self, pid: u64) -> String {
+        self.read_string_virt(pid, 0x100)
+    }
+
+    fn syscall_open(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64, r1: u64) {
+        use crate::messaging::{FileRequest, OpenFlags, ResponseData};
+        let path = self.get_syscall_path(pid);
+        let flags = if r1 == 0 { OpenFlags::read_only() } else { OpenFlags::create() };
+        if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Open { path, flags })) {
+            if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                if let Some(ResponseData::Fd(fd)) = resp.data() {
+                    cpu.write_register(crate::hardware::Register::R1, *fd as u64);
+                }
+            }
+        }
+    }
+
+    fn syscall_read(&self, _cpu: &mut crate::hardware::VirtualCPU, _pid: u64, r1: u64, r2: u64) {
+        use crate::messaging::{FileRequest, ResponseData};
+        // FIXME: write result to 0x200 instead of printing
+        let fd = r1 as u32;
+        let mut offset = 0u64;
+        let chunk = std::cmp::min(r2, 256) as usize;
+        loop {
+            if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Read { fd, offset, buf: 0, size: chunk })) {
+                if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                    if let Some(ResponseData::Bytes(data)) = resp.data() {
+                        if data.is_empty() { break; }
+                        print!("{}", String::from_utf8_lossy(&data));
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                        offset += data.len() as u64;
+                        if data.len() < chunk { break; }
+                    } else { break; }
+                } else { break; }
+            } else { break; }
+        }
+        println!();
+    }
+
+    fn syscall_write(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64, r1: u64, r2: u64) {
+        use crate::messaging::FileRequest;
+        let data = self.read_bytes_virt(pid, 0x200, r2 as usize);
+        self.bus.send(KernelMsg::File(FileRequest::WriteData { fd: r1 as u32, data })).ok();
+    }
+
+    fn syscall_mkdir(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        use crate::messaging::FileRequest;
+        let path = self.get_syscall_path(pid);
+        self.bus.send(KernelMsg::File(FileRequest::CreateDirectory { path })).ok();
+    }
+
+    fn syscall_unlink(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        use crate::messaging::FileRequest;
+        let path = self.get_syscall_path(pid);
+        self.bus.send(KernelMsg::File(FileRequest::Unlink { path })).ok();
+    }
+
+    fn syscall_stat(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        use crate::messaging::FileRequest;
+        let path = self.get_syscall_path(pid);
+        self.bus.send(KernelMsg::File(FileRequest::Stat { path })).ok();
+    }
+
+    fn syscall_listdir(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        use crate::messaging::{FileRequest, ResponseData};
+        // FIXME: write result to 0x200 instead of println!
+        let path = self.get_syscall_path(pid);
+        if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::ListDir { path })) {
+            if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                if let Some(ResponseData::StringList(entries)) = resp.data() {
+                    for e in entries { println!("{}", e); }
+                }
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Process syscalls
+    // ═══════════════════════════════════════════════════════════
+
+    fn syscall_fork(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        match self.fork_impl(pid) {
+            Ok(child_pid) => { cpu.write_register(crate::hardware::Register::R0, child_pid); }
+            Err(_) => { cpu.write_register(crate::hardware::Register::R0, 0); }
+        }
+    }
+
+    fn syscall_exec(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        let prog = self.read_string_virt(pid, 0x100);
+        let _ = self.exec_impl(pid, prog, vec![]);
+    }
+
+    fn syscall_tree(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        // FIXME: write result to 0x200 instead of println!
+        let path = self.read_string_virt(pid, 0x100);
+        let tree = self.build_tree(&path);
+        for line in &tree { println!("{}", line); }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Synchronization syscalls
+    // ═══════════════════════════════════════════════════════════
+
+    fn syscall_sem_create(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        let Ok(mut sync) = self.sync_manager.lock() else { return; };
+        let sem_id = sync.create_semaphore(pid, 1);
+        cpu.write_register(crate::hardware::Register::R1, sem_id);
+    }
+
+    fn syscall_sem_wait(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64, sem_id: u64) {
+        let blocked = {
+            let Ok(sync) = self.sync_manager.lock() else { return; };
+            if let Some(sem) = sync.get_semaphore(sem_id) {
+                sem.wait() != super::sync::SemaphoreResult::Acquired
+            } else { false }
+        };
+        if blocked {
+            if let Ok(table) = self.process_table.lock() {
+                if let Some(p) = table.get(&pid) {
+                    if let Ok(mut pcb) = p.lock() {
+                        pcb.state = ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr: sem_id });
+                    }
+                }
+            }
+            if let Ok(mut sched) = self.scheduler.lock() { sched.block(pid, 1); }
+            cpu.halt();
+        }
+    }
+
+    fn syscall_sem_signal(&self, _cpu: &mut crate::hardware::VirtualCPU, _pid: u64, sem_id: u64) {
+        let waiter: Option<u64> = {
+            if let Ok(table) = self.process_table.lock() {
+                table.iter().find_map(|(&p, pcb)| {
+                    if let Ok(pcb) = pcb.lock() {
+                        if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
+                            if *lock_addr == sem_id { return Some(p); }
+                        }
+                    }
+                    None
+                })
+            } else { None }
+        };
+        if let Some(wpid) = waiter {
+            if let Ok(table) = self.process_table.lock() {
+                if let Some(p) = table.get(&wpid) {
+                    if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
+                }
+            }
+            if let Ok(mut sched) = self.scheduler.lock() { sched.ready(wpid, 1, 128); }
+            if let Ok(mut cpus) = self.cpus.try_lock() {
+                if let Some(c) = cpus.get_mut(&wpid) { c.halted = false; }
+            }
+            vprintln!("PS: sem_signal {} transferred to PID {}", sem_id, wpid);
+        } else {
+            if let Ok(mut sync) = self.sync_manager.lock() {
+                if let Some(sem) = sync.get_semaphore(sem_id) { sem.signal(); }
+            }
+        }
+    }
+
+    fn syscall_lock_create(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        let mut sync = self.sync_manager.lock().unwrap();
+        let lock_id = sync.create_mutex(pid, false);
+        cpu.write_register(crate::hardware::Register::R1, lock_id);
+    }
+
+    fn syscall_lock_acquire(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64, lock_id: u64) {
+        let blocked = {
+            let sync = self.sync_manager.lock().unwrap();
+            if let Some(mutex) = sync.get_mutex(lock_id) {
+                mutex.try_acquire(pid) != super::sync::MutexResult::Acquired
+            } else { false }
+        };
+        if blocked {
+            if let Some(p) = self.process_table.lock().unwrap().get(&pid) {
+                if let Ok(mut pcb) = p.lock() {
+                    pcb.state = ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr: lock_id });
+                }
+            }
+            self.scheduler.lock().unwrap().block(pid, 1);
+            cpu.halt();
+        }
+    }
+
+    fn syscall_lock_release(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64, lock_id: u64) {
+        let waiter: Option<u64> = {
+            let table = self.process_table.lock().unwrap();
+            table.iter().find_map(|(&p, pcb)| {
+                if let Ok(pcb) = pcb.lock() {
+                    if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
+                        if *lock_addr == lock_id { return Some(p); }
+                    }
+                }
+                None
+            })
+        };
+        if let Some(wpid) = waiter {
+            if let Some(p) = self.process_table.lock().unwrap().get(&wpid) {
+                if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
+            }
+            self.scheduler.lock().unwrap().ready(wpid, 1, 128);
+            if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) {
+                c.halted = false;
+                let pc = c.pc();
+                if pc >= 8 { c.set_pc(pc - 8); }
+            }
+            if let Ok(mut sync) = self.sync_manager.lock() {
+                    if let Some(mutex) = sync.get_mutex(lock_id) { mutex.release(pid); }
+            }
+        } else {
+            let Ok(mut sync) = self.sync_manager.lock() else { return; };
+            if let Some(mutex) = sync.get_mutex(lock_id) { mutex.release(pid); }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Device syscalls
+    // ═══════════════════════════════════════════════════════════
+
+    fn syscall_device_open(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        println!("[DEVICE] pid={} requests clipboard", pid);
+        _cpu.write_register(crate::hardware::Register::R1, 0);
+    }
+
+    fn syscall_device_close(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+        println!("[DEVICE] pid={} releases clipboard", pid);
+    }
+
+    fn syscall_device_read(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64, max_size: u64) {
+        use crate::messaging::ResponseData;
+        let max_size = max_size as usize;
+        if let Ok(rx) = self.bus.send_request(KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardGet { max_size })) {
+            if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                if let Some(ResponseData::Bytes(data)) = resp.data() {
+                    for (i, &b) in data.iter().enumerate() {
+                        let _ = self._mmu.write_u8(pid, 0x200 + i as u64, b);
+                    }
+                    cpu.write_register(crate::hardware::Register::R2, data.len() as u64);
+                }
+            }
+        }
+    }
+
+    fn syscall_device_write(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64, _r1: u64, r2: u64) {
+        let size = r2 as usize;
+        let data = self.read_bytes_virt(pid, 0x200, size);
+        self.bus.send(KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardSet { data })).ok();
     }
 
     fn build_tree(&self, path: &str) -> Vec<String> {
