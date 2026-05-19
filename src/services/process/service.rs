@@ -286,7 +286,7 @@ impl ProcessService {
                 let count = if program.starts_with("dual") { 2 } else { 1 };
                 let mut shared_frame: Option<u64> = None;
                 if pname == "rwlock2" || pname == "rwlock3" {
-                    let mut sync = self.sync_manager.lock().unwrap();
+                    let Ok(mut sync) = self.sync_manager.lock() else { return Ok(()); };
                     sync.create_semaphore(0, 1);
                     sync.create_semaphore(0, 1);
                     drop(sync);
@@ -590,7 +590,7 @@ impl ProcessService {
 
         // State machine: transition previous Running→Ready on preemption
         {
-            let mut last = self.last_running.lock().unwrap();
+            let Ok(mut last) = self.last_running.lock() else { return Ok(()); };
             if let SchedulingDecision::Run { pid, .. } = &decision {
                 let prev = last[cpu_id];
                 if prev != Some(*pid) {
@@ -706,7 +706,7 @@ impl ProcessService {
                     // Just unblocked by sem_signal — unhalt, don't zombify
                     if let Some(cpu) = cpus.get_mut(&pid) { cpu.halted = false; }
                 } else {
-                    self.scheduler.lock().unwrap().remove(pid, 1);
+                    if let Ok(mut s) = self.scheduler.lock() { s.remove(pid, 1); }
                 if let Some(pcb) = self.process_table.lock().unwrap().get(&pid) {
                     if let Ok(mut p) = pcb.lock() {
                         if !p.state.is_terminated() {
@@ -1561,7 +1561,7 @@ impl ProcessService {
             // ── Synchronization syscalls ──
             200 => {
                 // SEM_CREATE: returns sem_id in R1
-                let mut sync = self.sync_manager.lock().unwrap();
+                let Ok(mut sync) = self.sync_manager.lock() else { return; };
                 let sem_id = sync.create_semaphore(pid, 1);
                 cpu.write_register(crate::hardware::Register::R1, sem_id);
             }
@@ -1569,7 +1569,7 @@ impl ProcessService {
                 // SEM_WAIT(sem_id): block if count=0
                 let sem_id = r1;
                 let blocked = {
-                    let sync = self.sync_manager.lock().unwrap();
+                    let Ok(sync) = self.sync_manager.lock() else { return; };
                     if let Some(sem) = sync.get_semaphore(sem_id) {
                         sem.wait() != super::sync::SemaphoreResult::Acquired
                     } else { false }
@@ -1664,7 +1664,7 @@ impl ProcessService {
                     self.scheduler.lock().unwrap().ready(wpid, 1, 128);
                     if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) { c.halted = false; }
                 } else {
-                    let mut sync = self.sync_manager.lock().unwrap();
+                    let Ok(mut sync) = self.sync_manager.lock() else { return; };
                     if let Some(mutex) = sync.get_mutex(lock_id) { mutex.release(pid); }
                 }
             }
