@@ -700,6 +700,9 @@ impl ProcessService {
                             // Release sem 0: HALT-without-exit shouldn't deadlock waiters
                             if let Ok(mut sync) = self.sync_manager.lock() {
                                 if let Some(sem) = sync.get_semaphore(0) { sem.signal(); }
+                                if let Some(mutex) = sync.get_mutex(0) {
+                                    if mutex.owner() == Some(pid) { mutex.release(pid); }
+                                }
                             }
                             vprintln!("PS: PID {} → Zombie", pid);
                             // Notify waiting parent
@@ -1224,6 +1227,18 @@ impl ProcessService {
 
             match signal {
                 SignalType::Terminate | SignalType::Kill => {
+                    // Release semaphore 0 if held (prevent deadlock)
+                    if let Ok(mut sync) = self.sync_manager.lock() {
+                        if let Some(sem) = sync.get_semaphore(0) {
+                            sem.signal();
+                        }
+                        // Also release any mutex owned by this process
+                        if let Some(mutex) = sync.get_mutex(0) {
+                            if mutex.owner() == Some(pid) {
+                                mutex.release(pid);
+                            }
+                        }
+                    }
                     pcb.state = ProcessState::Zombie { exit_code: 0 };
                     println!("ProcessService: Killed process {} ({})", pid, signal);
                 }
