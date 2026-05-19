@@ -1,8 +1,6 @@
 // Memory Management Unit (MMU) Simulation
 //
-// 曾国藩曰：
-// "凡读古书，遇有名理，必反复沉思，以求确解。"
-// MMU 乃虚实转换之枢纽，一字一码皆当反复推敲，不可有误。
+
 
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
@@ -169,9 +167,7 @@ impl MMU {
 
     /// Map a virtual page to a physical frame
     ///
-    /// 曾国藩曰：
-    /// "绘图之法，先定其位；映射之法，先定其址。"
-    /// 页表映射乃是虚地址到实地址的桥梁，必须精准无误。
+    
     pub fn map_page(
         &self,
         pid: Pid,
@@ -207,9 +203,7 @@ impl MMU {
     /// and checks permissions. If translation fails, an error is
     /// returned - the caller (kernel) must handle the page fault.
     ///
-    /// 曾国藩曰：
-    /// "译书之法，信达雅为上；译址之法，准快稳为先。"
-    /// 地址转换必须准确无误，错误将导致系统崩溃。
+    
     pub fn translate(
         &self,
         pid: Pid,
@@ -279,9 +273,7 @@ impl MMU {
 
     /// Read from virtual address
     ///
-    /// 曾国藩曰：
-    /// "取物于库，必先登记；取数于内存，必先译址。"
-    /// 每次虚存读取，必须经过地址转换。
+    
     pub fn read_u8(&self, pid: Pid, vaddr: VirtAddr) -> Result<u8, MMUError> {
         let paddr = self.translate(pid, vaddr, AccessType::Read)?;
         self.memory.read_u8(paddr as usize)
@@ -309,9 +301,7 @@ impl MMU {
 
     /// Dump MMU state for debugging
     ///
-    /// 曾国藩曰：
-    /// "每日检点账目，方能知其盈虚。"
-    /// MMU 状态亦当定期检查，方能知虚实映射之全貌。
+   
     pub fn dump_state(&self, pid: Pid) -> MMUState {
         let tables = self.page_tables.lock().unwrap();
 

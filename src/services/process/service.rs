@@ -1518,13 +1518,13 @@ impl ProcessService {
     // ═══════════════════════════════════════════════════════════
 
     fn syscall_print_char(&self, _cpu: &mut crate::hardware::VirtualCPU, _pid: u64, r1: u64) {
-        vprintln!("[PRINT] {}", r1 as i64);
+        println!("[PRINT] {}", r1 as i64);
     }
 
     fn syscall_print_str(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64, r1: u64, r2: u64) {
         let data = self.read_bytes_virt(pid, r1, r2 as usize);
         let s = String::from_utf8_lossy(&data);
-        vprintln!("{}", s);
+        println!("{}", s);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -1548,27 +1548,21 @@ impl ProcessService {
         }
     }
 
-    fn syscall_read(&self, _cpu: &mut crate::hardware::VirtualCPU, _pid: u64, r1: u64, r2: u64) {
+    fn syscall_read(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64, r1: u64, r2: u64) {
         use crate::messaging::{FileRequest, ResponseData};
-        // FIXME: write result to 0x200 instead of printing
         let fd = r1 as u32;
-        let mut offset = 0u64;
-        let chunk = std::cmp::min(r2, 256) as usize;
-        loop {
-            if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Read { fd, offset, buf: 0, size: chunk })) {
-                if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                    if let Some(ResponseData::Bytes(data)) = resp.data() {
-                        if data.is_empty() { break; }
-                        print!("{}", String::from_utf8_lossy(&data));
-                        use std::io::Write;
-                        let _ = std::io::stdout().flush();
-                        offset += data.len() as u64;
-                        if data.len() < chunk { break; }
-                    } else { break; }
-                } else { break; }
-            } else { break; }
+        let chunk = std::cmp::min(r2, 4096) as usize;
+        if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::Read { fd, offset: 0, buf: 0, size: chunk })) {
+            if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                if let Some(ResponseData::Bytes(data)) = resp.data() {
+                    let len = std::cmp::min(data.len(), 4096);
+                    for (i, &b) in data[..len].iter().enumerate() {
+                        let _ = self._mmu.write_u8(pid, 0x200 + i as u64, b);
+                    }
+                    cpu.write_register(crate::hardware::Register::R2, len as u64);
+                }
+            }
         }
-        println!();
     }
 
     fn syscall_write(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64, r1: u64, r2: u64) {
@@ -1595,14 +1589,19 @@ impl ProcessService {
         self.bus.send(KernelMsg::File(FileRequest::Stat { path })).ok();
     }
 
-    fn syscall_listdir(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
+    fn syscall_listdir(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
         use crate::messaging::{FileRequest, ResponseData};
-        // FIXME: write result to 0x200 instead of println!
         let path = self.get_syscall_path(pid);
         if let Ok(rx) = self.bus.send_request(KernelMsg::File(FileRequest::ListDir { path })) {
             if let Ok(resp) = rx.recv_timeout(std::time::Duration::from_millis(10)) {
                 if let Some(ResponseData::StringList(entries)) = resp.data() {
-                    for e in entries { println!("{}", e); }
+                    let data = entries.join("\n");
+                    let bytes = data.as_bytes();
+                    let len = std::cmp::min(bytes.len(), 4096);
+                    for (i, &b) in bytes[..len].iter().enumerate() {
+                        let _ = self._mmu.write_u8(pid, 0x200 + i as u64, b);
+                    }
+                    cpu.write_register(crate::hardware::Register::R2, len as u64);
                 }
             }
         }
@@ -1624,11 +1623,16 @@ impl ProcessService {
         let _ = self.exec_impl(pid, prog, vec![]);
     }
 
-    fn syscall_tree(&self, _cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
-        // FIXME: write result to 0x200 instead of println!
+    fn syscall_tree(&self, cpu: &mut crate::hardware::VirtualCPU, pid: u64) {
         let path = self.read_string_virt(pid, 0x100);
         let tree = self.build_tree(&path);
-        for line in &tree { println!("{}", line); }
+        let data = tree.join("\n");
+        let bytes = data.as_bytes();
+        let len = std::cmp::min(bytes.len(), 4096);
+        for (i, &b) in bytes[..len].iter().enumerate() {
+            let _ = self._mmu.write_u8(pid, 0x200 + i as u64, b);
+        }
+        cpu.write_register(crate::hardware::Register::R2, len as u64);
     }
 
     // ═══════════════════════════════════════════════════════════

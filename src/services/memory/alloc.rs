@@ -1,8 +1,6 @@
 // Memory Management Module
 //
-// 曾国藩曰：
-// "仓廪实而知礼节，衣食足而知荣辱。"
-// 内存管理乃系统之仓廪，当精打细算，物尽其用。
+
 
 use std::collections::{VecDeque, HashMap};
 use std::sync::{Arc, Mutex};
@@ -11,9 +9,7 @@ use crate::hardware::PhysicalMemory;
 
 /// Physical memory frame
 ///
-/// 曾国藩曰：
-/// "一粟一粒，当思来之不易。"
-/// 每一物理帧皆珍贵，需妥善管理。
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Frame {
     /// Physical frame number
@@ -69,9 +65,7 @@ impl Frame {
 
 /// Frame Allocator - Manages physical memory frames
 ///
-/// 曾国藩曰：
-/// "分粮当均，不可偏颇。"
-/// 帧分配器公平地分配物理内存帧。
+
 #[derive(Debug)]
 pub struct FrameAllocator {
     /// All frames
@@ -242,9 +236,7 @@ impl MemoryUsage {
 
 /// Physical Memory Manager
 ///
-/// 曾国藩曰：
-/// "统管全局，当知其大者。"
-/// 物理内存管理器统筹整个系统的物理内存。
+
 #[derive(Debug)]
 pub struct PhysicalMemoryManager {
     /// Frame allocator

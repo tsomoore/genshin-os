@@ -1,8 +1,6 @@
 // Physical Memory (RAM) Simulation
 //
-// 曾国藩曰：
-// "每日清晨，念虑杂生，当如治军，严整纪律。"
-// 内存乃系统之根基，每一字节之读写，皆当如临深渊，如履薄冰。
+
 
 use std::sync::{Arc, Mutex};
 use std::fmt;
@@ -12,9 +10,7 @@ use std::fmt;
 /// Represents the physical RAM of the system. All memory accesses
 /// must go through this interface to ensure thread safety and bounds checking.
 ///
-/// 曾国藩曰：
-/// "治军之道，以严明为本；治内存之道，以界限为要。"
-/// 内存越界乃是大错，必须严加防范。
+
 #[derive(Clone)]
 pub struct PhysicalMemory {
     /// Actual memory backing store
@@ -46,9 +42,7 @@ impl PhysicalMemory {
 
     /// Read a single byte from physical memory
     ///
-    /// 曾国藩曰：
-    /// "读一字当思其来之不易，用一物当念其来处不易。"
-    /// 每次读取都需检查边界，此乃基本功。
+    
     pub fn read_u8(&self, addr: usize) -> Result<u8, crate::error::MemoryError> {
         self.check_bounds(addr, 1)?;
 
@@ -116,9 +110,7 @@ impl PhysicalMemory {
 
     /// Write a single byte to physical memory
     ///
-    /// 曾国藩曰：
-    /// "下笔之时，当思此事关系甚大，不可草率。"
-    /// 写入内存亦当如此，必须慎之又慎。
+   
     pub fn write_u8(&self, addr: usize, value: u8) -> Result<(), crate::error::MemoryError> {
         self.check_bounds(addr, 1)?;
 
@@ -213,9 +205,7 @@ impl PhysicalMemory {
 
     /// Dump memory state for debugging/TUI display
     ///
-    /// 曾国藩曰：
-    /// "每日三省吾身：为人谋而不忠乎？与朋友交而不信乎？传不习乎？"
-    /// 内存状态亦需常省察，方能知其全貌。
+    
     pub fn dump_state(&self) -> MemoryState {
         let data = self.data.lock()
             .map_err(|_| crate::error::MemoryError::Locked)

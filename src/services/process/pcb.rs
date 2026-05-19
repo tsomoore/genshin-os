@@ -1,8 +1,6 @@
 // Process Control Block (PCB) and Thread Control Block (TCB)
 //
-// 曾国藩曰：
-// "治军之道，首在知兵；治进程之道，首在知其状态。"
-// PCB 乃进程之魂，记录其一切信息，当详加管理。
+
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -73,9 +71,7 @@ pub enum ThreadState {
 
 /// Thread Control Block (TCB)
 ///
-/// 曾国藩曰：
-// "一兵一卒，皆当登记造册，方知军力几何。"
-/// TCB 记录线程之所有状态信息。
+
 #[derive(Debug, Clone, )]
 pub struct TCB {
     /// Thread ID (unique within process)
@@ -187,8 +183,7 @@ impl Default for ThreadStats {
 
 /// Process Control Block (PCB)
 ///
-/// 曾国藩曰：
-/// "为将者，当知部下之姓名、籍贯、特长、性格，方能用人得当。"
+
 /// PCB 乃进程之档案，记录其一切信息，管理进程当以此为据。
 #[derive(Debug, Clone, )]
 pub struct PCB {

@@ -1,8 +1,6 @@
 // Virtual CPU (VCPU) with Mock ISA
 //
-// 曾国藩曰：
-// "为学之道，莫先于穷理；穷理之要，必在于读书。"
-// CPU 乃系统之大脑，指令执行如读书，当逐字逐句，不可跳越。
+
 
 use std::sync::Arc;
 use std::fmt;
@@ -57,10 +55,6 @@ impl fmt::Display for Register {
 }
 
 /// CPU flags register
-///
-/// 曾国藩曰：
-/// "志之所向，无坚不入；锐兵精甲，不能御也。"
-/// 标志位记录运算结果，如人之志向，指示后续行为。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CPUFlags {
     /// Zero flag (result was zero)
@@ -106,10 +100,6 @@ impl CPUFlags {
 }
 
 /// Instruction types for the Mock ISA
-///
-/// 曾国藩曰：
-/// "兵法云：知己知彼，百战不殆。"
-/// 指令集乃 CPU 之兵法，当熟记于心，方能运用自如。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     /// MOV dst, src - Move value
@@ -241,10 +231,6 @@ pub struct CPUState {
 /// When an exception occurs, it reports via the message bus
 /// and halts execution waiting for kernel handling.
 ///
-/// 曾国藩曰：
-/// "行军之道，步步为营；治事之道，循规蹈矩。"
-/// CPU 执行指令当步步为营，取指、译码、执行、查中断，
-/// 缺一不可，乱一必败。
 pub struct VirtualCPU {
     /// General-purpose registers R0-R3
     registers: [u64; 4],
@@ -365,9 +351,6 @@ impl VirtualCPU {
 
     /// Execute one instruction: fetch-decode-execute cycle
     ///
-    /// 曾国藩曰：
-    /// "读书之法，循序而渐进；执行之法，按步而推进。"
-    /// 每一步都不能跳过，否则必出大错。
     pub fn step(&mut self) -> Result<(), CPUError> {
         if self.halted { return Err(CPUError::Halted); }
         if self.pagefault_pending { return Ok(()); }
@@ -570,9 +553,7 @@ impl VirtualCPU {
 
     /// Execute a single instruction
     ///
-    /// 曾国藩曰：
-    /// "临事而惧，好谋而成。"
-    /// 执行指令当如临深渊，每一步都需谨慎检查。
+    
     fn execute_instruction(&mut self, instr: Instruction) -> Result<(), CPUError> {
         match instr {
             Instruction::Mov { dst, src } => {
@@ -608,9 +589,7 @@ impl VirtualCPU {
                 let dst_val = self.read_register(dst);
                 let src_val = self.read_operand(src);
 
-                // 曾国藩曰：
-                // "除数为零，乃数学之大忌，系统之大忌。"
-                // 此处必须严查，否则系统必崩。
+               
                 //
                 // CRITICAL: Check for division by zero
                 if src_val == 0 {
@@ -677,10 +656,7 @@ impl VirtualCPU {
     }
 
     /// Handle software interrupt (trap)
-    ///
-    /// 曾国藩曰：
-    /// "遇大事当静气，方寸不乱，方能成事。"
-    /// 处理中断当保存现场，从容不迫。
+    
     fn handle_software_interrupt(&mut self, vector: u8) -> Result<(), CPUError> {
         // Check if it's a syscall (INT 0x80)
         if vector == InterruptVector::Syscall.as_u8() {
@@ -706,9 +682,7 @@ impl VirtualCPU {
 
     /// Report divide-by-zero exception
     ///
-    /// 曾国藩曰：
-    /// "祸患常积于忽微，而智勇多困于所溺。"
-    /// 除零错误虽小，然必导致系统崩溃，不可不慎。
+ 
     fn report_divide_by_zero(&self) {
         let msg = KernelMsg::Interrupt(Interrupt::HardwareFailure {
             component: format!("CPU: Divide by zero in PID {} at PC {:#x}", self.current_pid, self.pc),
@@ -744,8 +718,7 @@ impl VirtualCPU {
 
     /// Dump CPU state for debugging/TUI display
     ///
-    /// 曾国藩曰：
-    /// "每日检点自身，知其得失；每日检点 CPU，知其状态。"
+
     pub fn dump_state(&self) -> CPUState {
         self.save_state()
     }

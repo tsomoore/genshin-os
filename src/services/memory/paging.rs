@@ -1,8 +1,6 @@
 // Paging Module
 //
-// 曾国藩曰：
-// "书分卷册，事当分门别类。"
-// 分页将虚拟地址空间划分为页，便于管理。
+
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -110,9 +108,7 @@ impl Default for PageFlags {
 
 /// Page table entry (maps virtual page to physical frame)
 ///
-/// 曾国藩曰：
-/// "目录索引，方知所在。"
-/// 页表项记录虚拟页到物理帧的映射。
+
 #[derive(Debug, Clone)]
 pub struct PageTableEntry {
     /// Virtual page number
@@ -196,9 +192,7 @@ impl PageTableEntry {
 
 /// Page table - maps virtual pages to physical frames
 ///
-/// 曾国藩曰：
-/// "目录书录，纲举目张。"
-/// 页表维护虚拟地址到物理地址的映射关系。
+
 #[derive(Debug)]
 pub struct PageTable {
     /// Process ID
@@ -336,8 +330,7 @@ pub struct PageTableStats {
 
 /// Page table manager for all processes
 ///
-/// 曾国藩曰：
-/// "总管诸册，当知其详。"
+
 /// 页表管理器统筹所有进程的页表。
 #[derive(Debug)]
 pub struct PageTableManager {

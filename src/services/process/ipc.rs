@@ -1,7 +1,6 @@
 // IPC (Inter-Process Communication) Module
 //
-// 曾国藩曰：
-// "沟通者，成事之基也。"
+
 // 进程间通信乃系统协作之基础，当慎之又慎。
 
 use std::collections::{HashMap, VecDeque};
@@ -14,8 +13,7 @@ use crate::messaging::BlockReason;
 
 /// Message queue for IPC
 ///
-/// 曾国藩曰：
-/// "书信往来，当有案可稽。"
+
 /// 消息队列记录进程间之一切通信。
 #[derive(Debug, Clone, )]
 pub struct MessageQueue {
@@ -139,8 +137,7 @@ pub enum QueueError {
 
 /// Shared memory region
 ///
-/// 曾国藩曰：
-/// "共用地土，当立界碑，以免争端。"
+
 /// 共享内存乃进程间共享之地，当明确界限与权限。
 #[derive(Debug, Clone, )]
 pub struct SharedMemoryRegion {

@@ -1,8 +1,6 @@
 // Swap Space Management Module
 //
-// 曾国藩曰：
-// "库有库管，仓有仓管，各有其职。"
-// 交换空间管理负责将不常用的内存页换出到磁盘。
+
 
 use std::collections::{VecDeque, HashMap};
 use std::sync::{Arc, Mutex};
@@ -11,9 +9,7 @@ use crate::hardware::VirtualDisk;
 
 /// Swap slot on disk
 ///
-/// 曾国藩曰：
-/// "寸土寸金，当善加利用。"
-/// 每个交换槽位都是宝贵的存储空间。
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwapSlot {
     /// Slot number
@@ -93,8 +89,7 @@ impl Default for SwapConfig {
 
 /// Swap space manager
 ///
-/// 曾国藩曰：
-/// "调盈济虚，当有预案。"
+
 /// 交换管理器在内存不足时，将不常用页面换出到磁盘。
 #[derive(Debug)]
 pub struct SwapManager {
