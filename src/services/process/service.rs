@@ -113,7 +113,7 @@ impl ProcessService {
             for _ in 0..10 {
                 match self.intr_rx.try_recv() {
                     Ok(env) => {
-                        if matches!(&env.message, KernelMsg::Interrupt(_)) {
+                        if matches!(&env.message, KernelMsg::Interrupt(crate::messaging::Interrupt::Timer)) {
                             self.handle_timer_interrupt().ok();
                             ticked = true;
                         }
