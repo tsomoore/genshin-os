@@ -697,9 +697,11 @@ impl ProcessService {
                     if let Ok(mut p) = pcb.lock() {
                         if !p.state.is_terminated() {
                             p.state = ProcessState::Zombie { exit_code: 0 };
-                            self.release_sem0_if_holder(pid);
-                            // Also release mutex if held
+                            // Release sem 0: HALT-without-exit shouldn't deadlock waiters
                             if let Ok(mut sync) = self.sync_manager.lock() {
+                                if let Some(sem) = sync.get_semaphore(0) {
+                                    if sem.value() == 0 { sem.signal(); }
+                                }
                                 if let Some(mutex) = sync.get_mutex(0) {
                                     if mutex.owner() == Some(pid) { mutex.release(pid); }
                                 }
@@ -1227,9 +1229,12 @@ impl ProcessService {
 
             match signal {
                 SignalType::Terminate | SignalType::Kill => {
-                    self.release_sem0_if_holder(pid);
-                    // Also release any mutex owned by this process
+                    // Release semaphore 0 if held (prevent deadlock)
                     if let Ok(mut sync) = self.sync_manager.lock() {
+                        if let Some(sem) = sync.get_semaphore(0) {
+                            if sem.value() == 0 { sem.signal(); }
+                        }
+                        // Also release any mutex owned by this process
                         if let Some(mutex) = sync.get_mutex(0) {
                             if mutex.owner() == Some(pid) {
                                 mutex.release(pid);
@@ -1306,49 +1311,6 @@ impl ProcessService {
         // Replaced by handle_list_processes_with_response
         println!("use pstree");
         Ok(())
-    }
-
-
-    /// Release semaphore 0 if this process holds it, using TOCTOU transfer
-    /// to unblock any waiter. Used on process exit/kill/zombie.
-    fn release_sem0_if_holder(&self, pid: Pid) {
-        let waiter: Option<Pid> = {
-            if let Ok(table) = self.process_table.lock() {
-                table.iter().find_map(|(&p, pcb)| {
-                    if let Ok(pcb) = pcb.lock() {
-                        if let ProcessState::Blocked(BlockReason::WaitingForLock { lock_addr }) = &pcb.state {
-                            if *lock_addr == 0 { return Some(p); }
-                        }
-                    }
-                    None
-                })
-            } else { None }
-        };
-
-        if let Ok(sync) = self.sync_manager.lock() {
-            if let Some(sem) = sync.get_semaphore(0) {
-                if sem.holder() != Some(pid) { return; }
-                if let Some(wpid) = waiter {
-                    // TOCTOU: transfer to waiter
-                    sem.set_holder(wpid);
-                    drop(sync);
-                    if let Ok(table) = self.process_table.lock() {
-                        if let Some(p) = table.get(&wpid) {
-                            if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
-                        }
-                    }
-                    if let Ok(mut sched) = self.scheduler.lock() { sched.ready(wpid, 1, 128); }
-                    if let Ok(mut cpus) = self.cpus.try_lock() {
-                        if let Some(c) = cpus.get_mut(&wpid) { c.halted = false; }
-                    }
-                    vprintln!("PS: release_sem0: transferred to PID {} on exit of PID {}", wpid, pid);
-                } else {
-                    // No waiter: just release
-                    sem.signal();
-                    sem.clear_holder();
-                }
-            }
-        }
     }
 
     fn handle_list_processes_with_response(&self, envelope: &Envelope) -> GenshinResult<()> {
@@ -1506,7 +1468,12 @@ impl ProcessService {
                         p.state = ProcessState::Zombie { exit_code };
                     }
                 }
-                self.release_sem0_if_holder(pid);
+                // Release sem 0: unblock any waiter (prevent permanent deadlock)
+                if let Ok(mut sync) = self.sync_manager.lock() {
+                    if let Some(sem) = sync.get_semaphore(0) {
+                        if sem.value() == 0 { sem.signal(); }
+                    }
+                }
 
                 // 4. Remove from scheduler
                 self.scheduler.lock().unwrap().block(pid, 1);
@@ -1607,11 +1574,7 @@ impl ProcessService {
                 let blocked = {
                     let Ok(sync) = self.sync_manager.lock() else { return; };
                     if let Some(sem) = sync.get_semaphore(sem_id) {
-                        let res = sem.wait();
-                        if res == super::sync::SemaphoreResult::Acquired {
-                            sem.set_holder(pid);
-                            false
-                        } else { true }
+                        sem.wait() != super::sync::SemaphoreResult::Acquired
                     } else { false }
                 };
                 if blocked {
@@ -1642,28 +1605,20 @@ impl ProcessService {
                     } else { None }
                 };
                 if let Some(wpid) = waiter {
-                    // TOCTOU: transfer holder to waiter
-                    if let Ok(sync) = self.sync_manager.lock() {
-                        if let Some(sem) = sync.get_semaphore(sem_id) {
-                            sem.set_holder(wpid);
-                        }
-                    }
                     if let Ok(table) = self.process_table.lock() {
                         if let Some(p) = table.get(&wpid) {
                             if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
                         }
                     }
                     if let Ok(mut sched) = self.scheduler.lock() { sched.ready(wpid, 1, 128); }
+                    // Try to unhalt immediately (if cpus lock available)
                     if let Ok(mut cpus) = self.cpus.try_lock() {
                         if let Some(c) = cpus.get_mut(&wpid) { c.halted = false; }
                     }
                     vprintln!("PS: sem_signal {} transferred to PID {}", sem_id, wpid);
                 } else {
                     if let Ok(mut sync) = self.sync_manager.lock() {
-                        if let Some(sem) = sync.get_semaphore(sem_id) {
-                            sem.signal();
-                            sem.clear_holder();
-                        }
+                        if let Some(sem) = sync.get_semaphore(sem_id) { sem.signal(); }
                     }
                 }
             }

@@ -35,11 +35,8 @@ pub struct Semaphore {
     /// Maximum value (to prevent overflow)
     max_value: u32,
 
-    /// Creator process ID
+    /// Owner process ID
     pub owner_pid: crate::messaging::Pid,
-
-    /// Current holder (u64::MAX = no holder)
-    holder: AtomicU64,
 
     /// Number of waiting processes
     wait_count: AtomicU32,
@@ -57,7 +54,6 @@ impl Semaphore {
             initial_value,
             max_value: u32::MAX,
             owner_pid,
-            holder: AtomicU64::new(u64::MAX),
             wait_count: AtomicU32::new(0),
             valid: AtomicBool::new(true),
         }
@@ -71,7 +67,6 @@ impl Semaphore {
             initial_value,
             max_value,
             owner_pid,
-            holder: AtomicU64::new(u64::MAX),
             wait_count: AtomicU32::new(0),
             valid: AtomicBool::new(true),
         }
@@ -80,22 +75,6 @@ impl Semaphore {
     /// Get current value
     pub fn value(&self) -> u32 {
         self.value.load(Ordering::Acquire)
-    }
-
-    /// Get current holder (None if no one holds it)
-    pub fn holder(&self) -> Option<crate::messaging::Pid> {
-        let h = self.holder.load(Ordering::Acquire);
-        if h == u64::MAX { None } else { Some(h as crate::messaging::Pid) }
-    }
-
-    /// Set current holder
-    pub fn set_holder(&self, pid: crate::messaging::Pid) {
-        self.holder.store(pid as u64, Ordering::Release);
-    }
-
-    /// Clear holder
-    pub fn clear_holder(&self) {
-        self.holder.store(u64::MAX, Ordering::Release);
     }
 
     /// Wait operation (P operation) - decrement value, block if zero
