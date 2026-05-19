@@ -1,8 +1,6 @@
 // Virtual File System Module
 //
-// 曾国藩曰：
-// "治大国如烹小鲜，治文书如理丝麻。"
-// 虚拟文件系统统一管理各类文件系统，提供统一接口。
+
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

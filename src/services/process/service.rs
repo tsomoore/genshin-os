@@ -1468,6 +1468,7 @@ impl ProcessService {
             100 => self.syscall_fork(cpu, pid),
             101 => self.syscall_exec(cpu, pid),
             102 => self.syscall_tree(cpu, pid),
+          //103 => self.syscall_time(cpu, pid),
             // ── Synchronization ──
             200 => self.syscall_sem_create(cpu, pid),
             201 => self.syscall_sem_wait(cpu, pid, r1),
@@ -1784,7 +1785,13 @@ impl ProcessService {
         let data = self.read_bytes_virt(pid, 0x200, size);
         self.bus.send(KernelMsg::Device(crate::messaging::DeviceRequest::ClipboardSet { data })).ok();
     }
-
+//     fn syscall_time(&self, cpu: &mut VirtualCPU, _pid: u64) {
+//     let t = std::time::SystemTime::now()
+//         .duration_since(std::time::UNIX_EPOCH)
+//         .unwrap_or_default()
+//         .as_secs();
+//     cpu.write_register(Register::R0, t);
+// }
     fn build_tree(&self, path: &str) -> Vec<String> {
         let mut result = Vec::new();
         result.push(path.to_string());

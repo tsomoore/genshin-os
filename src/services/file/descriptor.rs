@@ -1,8 +1,6 @@
 // File Descriptor Management Module
 //
-// 曾国藩曰：
-// "户籍档案，当井井有条。"
-// 文件描述符管理器负责跟踪所有打开的文件。
+
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
