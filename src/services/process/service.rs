@@ -1466,7 +1466,7 @@ impl ProcessService {
 
                 vprintln!("PS: PID {} exited with code {}", pid, exit_code);
             },
-            1 => vprintln!("[PRINT] {}", r1 as i64),
+            1 => eprintln!("[PRINT] {}", r1 as i64),
             2 => {
                 let data = self.read_bytes_virt(pid, r1, r2 as usize);
                 let s = String::from_utf8_lossy(&data);
@@ -1648,11 +1648,16 @@ impl ProcessService {
                         if let Ok(mut pcb) = p.lock() { pcb.state = ProcessState::Ready; }
                     }
                     self.scheduler.lock().unwrap().ready(wpid, 1, 128);
-                    if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) { c.halted = false; }
-                    // Update mutex owner to the waiter (TOCTOU transfer)
+                    if let Some(c) = self.cpus.lock().unwrap().get_mut(&wpid) {
+                        c.halted = false;
+                        // Rewind PC to re-execute the INT that caused the block
+                        let pc = c.pc();
+                        if pc >= 8 { c.set_pc(pc - 8); }
+                    }
+                    // Release lock (waiter will acquire on its own via try_acquire)
                     if let Ok(mut sync) = self.sync_manager.lock() {
                         if let Some(mutex) = sync.get_mutex(lock_id) {
-                            mutex.set_owner(wpid);
+                            mutex.release(pid);
                         }
                     }
                 } else {
