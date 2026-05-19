@@ -704,7 +704,7 @@ impl ProcessService {
                                     if mutex.owner() == Some(pid) { mutex.release(pid); }
                                 }
                             }
-                            eprintln!("PS: PID {} → Zombie (halted, not blocked)", pid);
+                            vprintln!("PS: PID {} → Zombie", pid);
                             // Notify waiting parent
                             let mut wp = self.waiting_parents.lock().unwrap();
                             if let Some(pos) = wp.iter().position(|(cpid, _)| *cpid == pid) {
@@ -751,7 +751,7 @@ impl ProcessService {
         // Remove from process table
         if let Ok(mut table) = Self::lock_mutex(&self.process_table) {
             table.remove(&pid);
-            eprintln!("PS: PID {} reaped", pid);
+            vprintln!("PS: PID {} reaped", pid);
         }
     }
 
