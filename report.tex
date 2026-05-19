@@ -118,36 +118,82 @@
 
 \subsubsection{功能描述}
 
-genshin-OS（Chao-OS）是一个基于 Rust 语言开发的微内核操作系统模拟器。系统严格遵循四层架构（用户交互层、交换层、服务层、硬件层），所有跨模块通信均通过中央异步消息总线完成。项目实现了完整的进程管理（Fork/Exec/Exit/Wait 模型）、SMP 双核调度、信号量与互斥锁同步、文件系统 CRUD、虚拟磁盘持久化、设备管理、以及一个交互式命令行 Shell。
+genshin-OS（Chao-OS）是一个基于 Rust 语言从零开发的\heiti{微内核操作系统模拟器}。系统在单个 Linux 进程中完整模拟了操作系统的四层抽象：硬件层（虚拟 CPU、MMU、定时器、磁盘）、服务层（进程管理、内存管理、文件系统、设备驱动）、交换层（消息总线与内核路由）、用户交互层（Shell 与 TUI 监控器）。
+
+\textbf{硬件模拟}：VirtualCPU 实现了 20 余条自定义 Mock ISA 指令（含 MOV/ADD/SUB/MUL/DIV/CMP/JMP/JZ/JNZ/LOAD/STORE/INT/HALT），支持取指-解码-执行三阶段流水线、CPU 标志位（Zero/Sign/Carry/Overflow）以及 INT 0x80 软中断。MMU 管理 per-PID 的页表，实现虚拟地址到物理地址的转换。Timer 以 100Hz 频率通过独立线程发出时钟中断，作为进程调度的"心跳"。VirtualDisk 通过文件 I/O 模拟 512 字节扇区的块设备存储。
+
+\textbf{进程管理}：实现完整的\heiti{Fork-Exec-Exit-Wait} 进程生命周期模型，摒弃简单粗暴的 Spawn 模式。每个用户程序（包括 ls、mkdir、cat 等内置命令）都必须经过 Fork 创建→Exec 加载→运行→Exit 退出→Wait 回收的完整流程。PCB（进程控制块）管理进程状态机（Creating→Ready→Running→Blocked→Zombie），支持多线程 TCB。SMP 双核调度器支持 RoundRobin/FIFO/Priority/SJF/MLFQ 五种策略，per-CPU 量子管理和跨核去重。
+
+\textbf{同步原语}：实现了基于 AtomicU32 CAS 循环的信号量（Semaphore，P/V 操作）和基于 AtomicU64 owner 跟踪的互斥锁（MutexLock，支持递归）。关键的 TOCTOU 所有权转移机制——信号量释放时不盲自 count++，而是扫描进程表将所有权直接转移给阻塞的等待者——解决了多核环境下"释放后立即被调用者抢回"的竞态条件。全局信号量 0 和互斥锁 0 在系统启动时预创建，供 syncdemo 等演示程序使用。
+
+\textbf{文件系统}：实现四层文件系统栈——FileService（消息驱动的顶层服务）→VFS（基于 HashMap 的 inode 树，支持文件和目录的创建/查找/删除，通过 Serde JSON 持久化到 .genshin-vfs.json）→File（Vec<u8> 内存缓冲 + VirtualDisk 扇区映射）→VirtualDisk（基于 .genshin-disk.img 文件的 512B 块设备）。FileDescriptorManager 维护每进程的 fd 表，支持 open/close/read/write 操作。启动时自动从 programs/ 目录导入 .asm 源文件到 VFS。
+
+\textbf{IPC 与设备}：IPCManager 提供进程间消息队列（send/receive/peek）和共享内存（create/attach/detach，引用计数管理）。DeviceService 直接订阅消息总线（不经 Kernel 路由），实现剪贴板设备的读写（ClipboardGet/Set），通过 DeviceRegistry 注册和管理设备驱动。
+
+\textbf{用户界面}：交互式 Shell 支持 20+ 条命令（文件操作：ls/tree/mkdir/touch/cat/write/rm/stat；进程管理：ps/pstree/kill/dual；系统：cd/pwd/verbose/uptime/help/exit）。pmon 提供 TUI 实时进程/内存/磁盘监控。minigdb 提供独立 CPU+MMU 的单步调试器（step/regs/continue/quit），可直接调试 .asm 程序而不干扰运行中的系统。
+
+\textbf{项目规模}：约 15,000 行 Rust 代码，211 次 Git 提交，12 份设计文档，20+ 个 .asm 用户态测试程序。
 
 \subsubsection{运行环境}
 
 \begin{itemize}
-    \item 操作系统：Linux（Arch Linux / Ubuntu 22.04+）
-    \item 运行时：Rust 编译的二进制文件，无外部运行时依赖
-    \item 终端：支持 ANSI 转义序列的终端模拟器
+    \item \textbf{操作系统}：Linux（在 Arch Linux 上开发，兼容 Ubuntu 22.04+）。依赖 Linux 的线程模型（std::thread）、文件 I/O、以及 ANSI 终端控制序列。
+    \item \textbf{Rust 运行时}：项目编译为单一二进制文件，无外部运行时依赖（如 JVM、Python 解释器）。所有依赖均为 Rust 生态内的纯 Rust 库。
+    \item \textbf{终端要求}：支持 ANSI 转义序列的终端模拟器（如 Alacritty、Kitty、GNOME Terminal、Windows Terminal）。pmon TUI 使用 \texttt{\textbackslash{}033[} 控制码实现光标定位和颜色。
+    \item \textbf{外部依赖（Cargo.toml）}：crossbeam-channel（多生产者多消费者无界通道，用于消息总线）、serde/serde\_json（VFS 树的 JSON 序列化/反序列化）。均为 MIT/Apache-2.0 双重许可的工业级库。
+    \item \textbf{内存占用}：运行时约 50-100MB（含 4MB 物理内存模拟、两个 4096 页表、VFS 树、磁盘缓存）。
 \end{itemize}
 
 \subsubsection{开发环境}
 
 \begin{itemize}
-    \item 编程语言：Rust（edition 2021）
-    \item 编译器：rustc 1.70+
-    \item 构建工具：Cargo
-    \item 版本控制：Git
-    \item 编辑器：VS Code / Neovim
+    \item \textbf{编程语言}：Rust（edition 2021）。选择 Rust 的核心原因：① 所有权系统和借用检查器在编译期消除数据竞态和悬垂指针，适合并发密集的操作系统开发；② 零成本抽象的 enum/match/Arc<Mutex<T>> 模式完美匹配消息驱动的架构；③ Cargo 的依赖管理和测试框架无需 Makefile/CMake 等额外构建工具。
+    \item \textbf{编译器}：rustc 1.70+（stable channel）。使用 2021 edition 的闭包捕获规则和 const 泛型等特性。
+    \item \textbf{构建系统}：Cargo。常用命令：\texttt{cargo build}（调试构建）、\texttt{cargo run}（构建并运行）、\texttt{cargo check}（仅类型检查不编译）、\texttt{cargo test}（运行单元测试）、\texttt{cargo fmt}（代码格式化）、\texttt{cargo clippy}（静态分析 lint）。
+    \item \textbf{版本控制}：Git。采用 conventional commits 规范（\texttt{fix:/feat:/docs:/refactor:/chore:}），每个逻辑修改独立提交。仓库共 211 次提交，提交信息包含问题分析和修复说明。
+    \item \textbf{编辑器}：VS Code（rust-analyzer 插件提供实时类型检查和代码补全）或 Neovim（rust-tools.nvim）。
+    \item \textbf{文档编译}：LaTeX 报告使用 xelatex 编译（ctexart 文档类），需安装 TeX Live 完整版或 texlive-xetex + texlive-latex-extra 包。
 \end{itemize}
 
 \subsection{设计思想}
 
 \subsubsection{软件设计构思}
 
-本系统采用\heiti{微内核架构}，核心思想是\heiti{最小化内核态功能，最大化用户态服务}。内核（Kernel）仅负责消息路由，不执行任何业务逻辑。所有系统功能（进程管理、内存管理、文件系统、设备管理）均作为独立的用户态服务运行，彼此之间通过消息总线（MessageBus）进行异步通信。
+\textbf{1. 微内核架构：最小化信任计算基础}
 
-系统模拟了真实的硬件层：VirtualCPU 执行自定义 Mock ISA 指令，MMU 负责虚拟地址到物理地址的转换，Timer 以 100Hz 频率发出时钟中断驱动进程调度，VirtualDisk 提供基于文件的块设备存储。
+本项目严格遵循\heiti{微内核（Microkernel）}设计哲学：内核（Kernel）仅做一件事——消息路由。系统调用、进程调度、内存分配、文件操作、设备驱动均以独立的\heiti{用户态服务}形式运行在各自的线程中。这种设计的核心优势是\heiti{隔离性}：一个服务的崩溃（如 FileService 在解析路径时 panic）不会影响其他服务（ProcessService 仍可调度进程）。L4 家族（seL4、Pistachio）和 QNX 等工业级微内核均采用此架构。
 
-进程管理严格遵循 Unix 的 Fork-Exec-Exit-Wait 模型，不使用 ``fire and forget'' 的 Spawn 模式。所有程序（包括 ls、mkdir 等内置命令）均通过 Fork + Exec + Wait 流程运行在独立的虚拟 CPU 上。
+内核路由器的实现极为精简（仅 51 行代码，见 src/services/kernel.rs）：它在消息总线上阻塞等待 Envelope，根据 KernelMsg 枚举的变体将消息转发到四个专用通道（process\_tx、intr\_tx、memory\_tx、file\_tx）。内核不解析消息内容、不维护任何状态、不执行业务逻辑——它是真正的\heiti{"消息交换机"}。
 
+\textbf{2. 消息总线：统一通信语言}
+
+所有跨模块通信强制通过 MessageBus trait 定义的接口：send()（发后即忘）、send\_request()（请求-响应）、subscribe()（订阅）。LockedBus 实现基于 Arc<Mutex<Vec<Sender<Envelope>>>>——订阅者列表由 Mutex 保护，消息通过 crossbeam-channel 的 unbounded 通道传递。
+
+KernelMsg 枚举（7 个变体）是整个系统的\heiti{通信语言}：Syscall（用户系统调用）、Interrupt（硬件中断，含 Timer/PageFault/SyscallTrap）、Process（进程服务请求，含 30+ 子变体覆盖调度/IPC/同步/生命周期）、Memory（内存分配/映射/换页）、File（文件 CRUD/目录操作）、Device（设备读写）。任何模块只能使用这个枚举中的类型发送消息，不能调用其他模块的函数。这确保了\heiti{接口的强制统一性}——审查一个模块的行为只需检查它如何处理 KernelMsg。
+
+Envelope 信封机制支持两种通信模式：fire\_and\_forget 用于通知（如 Timer 发送时钟中断），with\_response 用于查询（如 Shell 的 send\_and\_wait 发送 ps 请求并等待进程列表）。响应通过 Envelope 内嵌的 response\_channel（一个 crossbeam Sender<Response>）传递，调用方用 recv\_timeout(3s) 阻塞等待。
+
+\textbf{3. 两层译码：硬件与内核的职责分离}
+
+系统调用的处理采用\heiti{两层译码}模型：\begin{enumerate}[label=(\arabic*)]\item \textbf{CPU 译码指令}：VirtualCPU 执行 INT 0x80 时，仅保存寄存器到 syscall\_regs、设置 syscall\_pending=true、停机。它不知道 R0=18 代表 listdir，也不关心。\item \textbf{ProcessService 译码调用号}：定时器中断的 step loop 检查 syscall\_pending 后，调 handle\_file\_syscall(cpu, r0, r1, r2)，由 match r0 分派到 24 个 syscall\_xxx() handler。\end{enumerate}这种分离的核心理由是\heiti{硬件层不应知道操作系统策略}。真实的 x86 CPU 上，INT 0x80 只触发中断切换到内核态，系统调用号的解释完全由内核完成。我们的模拟保持了同样的抽象边界。
+
+\textbf{4. Fork-Exec 模型：为什么不用 Spawn}
+
+进程创建采用 Unix 经典的\heiti{Fork-Exec-Wait}三步模型，而非 Windows 式的 Spawn（CreateProcess 一步到位）。具体流程：ForkProcess（克隆父进程的页表和 CPU 状态，子进程 R0=0 标识其为 child，从父进程 PC 继续执行）→ ExecProcess（替换子进程的页表，加载 .asm 程序，重置 CPU PC=0，加入就绪队列）→ WaitChild（父进程阻塞直到子进程退出为 Zombie，然后回收资源）。
+
+选择 Fork-Exec 而非 Spawn 的设计理由：① \heiti{正交性}——Fork 只做"复制"，Exec 只做"替换"，职责单一，便于测试和调试；② \heiti{灵活性}——Fork 后 Exec 前可以执行任意操作（如重定向文件描述符），为未来的管道和重定向功能预留空间；③ \heiti{教学价值}——这是 Unix 操作系统的核心设计，理解 Fork-Exec 是理解 Unix 进程模型的关键。fork\_impl 创建子进程后\heiti{不立即调度}，等待 exec\_impl 加载代码后才加入就绪队列，避免无代码进程被调度导致的页错误→Zombie 竞态。
+
+\textbf{5. 系统调用的两路分发：何时走总线、何时不走}
+
+系统调用处理分为两条路径：\begin{itemize}\item \textbf{文件/设备类（R0=10-18, 208-211）}：走消息总线。handler 从进程 0x100 读参数，发 KernelMsg::File/Device，Kernel 路由到 FileService/DeviceService，响应返回后写结果到进程 0x200，设 R2=字节数。\item \textbf{进程/同步类（R0=0, 100-102, 200-205）}：不走总线，直接操作本地数据（process\_table、MMU、SyncManager）。\end{itemize}区分依据是\heiti{数据局部性}：进程和同步的数据在 ProcessService 内部，走总线是浪费；文件数据在 FileService，必须走总线。
+
+\textbf{6. 同步与异步的权衡}
+
+当前 INT 0x80 系统调用都是\heiti{同步}的——CPU 停机等待 handler 返回后才继续。这简化了 .asm 程序（线性执行，无需回调），代价是 CPU 在等 I/O 时完全阻塞。真正的微内核（如 seL4）使用异步 IPC 加 Notification 通知机制。鉴于 .asm 程序仅 3-15 条指令、数据量极小（<4KB），同步等待的开销（recv\_timeout(10ms)）可忽略。未来若支持网络栈或大文件，异步模型将更有价值。
+
+\textbf{7. VFS 持久化：JSON + 二进制混合策略}
+
+VFS 树结构使用 Serde JSON 持久化到 .genshin-vfs.json。选择 JSON 的理由：① \heiti{可调试性}——开发者可直接用文本编辑器查看文件系统状态；② \heiti{简单性}——derive 宏零代码实现序列化。代价是比二进制大约 3-5 倍，但 inode 数不超过 200 的小规模文件系统可忽略。磁盘镜像 .genshin-disk.img 使用\heiti{二进制格式}（512B 扇区），因为文件内容本身就是二进制。这种"元数据 JSON + 数据二进制"的混合策略平衡了可调试性和效率。
 \subsubsection{关键技术与算法}
 
 \begin{enumerate}[label=(\arabic*)]
