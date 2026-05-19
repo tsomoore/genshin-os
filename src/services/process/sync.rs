@@ -415,6 +415,7 @@ impl SyncManager {
         };
         // Pre-create global semaphore 0 (binary mutex) for rwlock/dual demos
         sm.create_semaphore(0, 1);
+        sm.create_mutex(0, false); // mutex 0 for syncdemo
         sm
     }
 
