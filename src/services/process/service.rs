@@ -631,7 +631,7 @@ impl ProcessService {
                 if cpu.is_halted() {
                     let is_ready = if let Ok(t) = self.process_table.lock() {
                         t.get(&pid).and_then(|p| p.lock().ok())
-                            .map(|pcb| pcb.state == ProcessState::Ready).unwrap_or(false)
+                            .map(|pcb| pcb.state == ProcessState::Ready || pcb.state == ProcessState::Running).unwrap_or(false)
                     } else { false };
                     if is_ready { cpu.halted = false; }
                 }
@@ -685,7 +685,7 @@ impl ProcessService {
             // xv6-style: halt → Zombie (parent or init will reap)
             let is_blocked = if let Ok(t) = self.process_table.lock() { t.get(&pid).and_then(|p| p.lock().ok()).map(|p| p.state.is_blocked()).unwrap_or(false) } else { false };
             let is_ready = if let Ok(t) = self.process_table.lock() {
-                t.get(&pid).and_then(|p| p.lock().ok()).map(|pcb| pcb.state == ProcessState::Ready).unwrap_or(false)
+                t.get(&pid).and_then(|p| p.lock().ok()).map(|pcb| pcb.state == ProcessState::Ready || pcb.state == ProcessState::Running).unwrap_or(false)
             } else { false };
             if pid != 1 && !is_blocked && cpus.get(&pid).map(|c| c.is_halted()).unwrap_or(false) {
                 if is_ready {
@@ -704,7 +704,7 @@ impl ProcessService {
                                     if mutex.owner() == Some(pid) { mutex.release(pid); }
                                 }
                             }
-                            vprintln!("PS: PID {} → Zombie", pid);
+                            eprintln!("PS: PID {} → Zombie (halted, not blocked)", pid);
                             // Notify waiting parent
                             let mut wp = self.waiting_parents.lock().unwrap();
                             if let Some(pos) = wp.iter().position(|(cpid, _)| *cpid == pid) {
@@ -751,7 +751,7 @@ impl ProcessService {
         // Remove from process table
         if let Ok(mut table) = Self::lock_mutex(&self.process_table) {
             table.remove(&pid);
-            vprintln!("PS: PID {} reaped", pid);
+            eprintln!("PS: PID {} reaped", pid);
         }
     }
 
