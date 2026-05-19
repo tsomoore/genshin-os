@@ -10,11 +10,6 @@ use genshin_os::{LockedBus, Shell};
 use std::sync::Arc;
 use std::thread;
 
-extern "C" fn verbose_toggle_handler(_: i32) {
-    let v = genshin_os::verbose::is_verbose();
-    genshin_os::verbose::set_verbose(!v);
-    eprintln!("\n[verbose: {}]\n", if v { "OFF" } else { "ON" });
-}
 
 fn main() {
     println!("Initializing Genshin-OS microkernel simulation...");
@@ -70,10 +65,7 @@ fn main() {
     });
     println!("\u{2713} Device service");
 
-    // Ctrl+\ (SIGQUIT) toggles verbose mode
-    unsafe {
-        libc::signal(libc::SIGQUIT, verbose_toggle_handler as libc::sighandler_t);
-    }
+// Ctrl+\ toggle removed — use "verbose off" command instead
 
     let mut shell = Shell::new(bus, timer);
     println!("\u{2713} Shell\n");
